@@ -5,9 +5,18 @@ Real-time display + MQTT bridge for **two LiTime 48V 100Ah Smart ComFlex** batte
 dashboard app.
 
 - **Seeed Studio XIAO ESP32-S3** (dual-core, BLE + WiFi) running the firmware
-- **Waveshare 2.4" ILI9341 LCD** (240×320, SPI) for an at-a-glance physical display
+- **Waveshare 2.4" ILI9341 LCD** (240×320, SPI) — *optional* physical display (see note below)
 - **Local MQTT broker** (Mosquitto / Home Assistant) as the data bus
 - **PyQt5 desktop dashboard** (`litime_monitor.py`) with live charts, history, and event logging
+
+> ### 🖥️ The LCD display is optional
+> Every value shown on the physical screen is also published over MQTT and
+> shown live in the desktop dashboard and Home Assistant. If you don't wire
+> up the Waveshare ILI9341 panel, the ESP32-S3 firmware still runs and
+> functions completely normally (BLE polling, Victron decoding, MQTT
+> publishing, HA discovery) — the display code simply has nothing physically
+> attached to draw to. Skip the **Hardware Wiring** section entirely if you
+> only plan to monitor via MQTT / the desktop app / Home Assistant.
 
 > ### 🤖 About this project
 > This entire application — the ESP32-S3 firmware, the display UI, the MQTT
@@ -41,7 +50,7 @@ dashboard app.
 |---|---|
 | BLE polling | Both LiTime batteries polled every 2 s (alternating) |
 | Victron MPPT | Passive BLE advertising scan — decrypts Victron's encrypted "Extra Manufacturer Data" broadcast, no pairing/connection required |
-| SOC display | Large colour-coded bars, on both the physical LCD and the desktop app |
+| SOC display | Large colour-coded bars, on both the physical LCD (optional) and the desktop app |
 | Live data | Voltage · Current · Power · Cell temps · MOSFET temp · PV power · Yield |
 | Cell voltages | Full grid per battery, min/max/delta highlighted |
 | Estimated time | Time-to-full (charging) / time-to-10%-reserve (discharging) — see note below |
@@ -85,6 +94,11 @@ images/                    Screenshots used in this README
 ---
 
 ## Hardware Wiring
+
+> **This entire section is optional.** The firmware runs fine with nothing
+> wired to the display pins — you'll just have no physical screen output.
+> All data is still available via MQTT, the desktop dashboard, and Home
+> Assistant. Only follow this section if you want the physical LCD readout.
 
 ### XIAO ESP32-S3 → Waveshare 2.4" ILI9341
 
