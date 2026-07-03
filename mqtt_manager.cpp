@@ -280,12 +280,23 @@ void MQTTManager::publishVictron(const VictronData& v) {
 
 // ---------------------------------------------------------------------------
 // Publish Home Assistant MQTT discovery for key sensors
+//
+// NOTE: uid/deviceId are caller-supplied and MUST be unique per battery
+// (previously this used only `valueKey` for the unique_id and a single
+// shared device identifier for both batteries, which meant Battery 1 and
+// Battery 2's discovery configs collided on the exact same retained MQTT
+// topic — Battery 2's config silently overwrote Battery 1's, so only one
+// battery's worth of sensors, merged under one "LiTime Dual BMS" device,
+// ever actually showed up in Home Assistant).
 // ---------------------------------------------------------------------------
 void MQTTManager::_haConfigSensor(const char* topicBase, const char* name,
                                    const char* valueKey, const char* unit,
-                                   const char* devClass) {
+                                   const char* devClass,
+                                   const char* uidPrefix,
+                                   const char* deviceId,
+                                   const char* deviceName) {
     char uid[64];
-    snprintf(uid, sizeof(uid), "litime_%s", valueKey);
+    snprintf(uid, sizeof(uid), "%s_%s", uidPrefix, valueKey);
 
     char stateTopic[80];
     snprintf(stateTopic, sizeof(stateTopic), "%s/state", topicBase);
@@ -299,10 +310,14 @@ void MQTTManager::_haConfigSensor(const char* topicBase, const char* name,
     if (devClass && strlen(devClass) > 0) doc["device_class"]    = devClass;
 
     JsonObject dev = doc["device"].to<JsonObject>();
-    dev["identifiers"][0] = "litime_dual_monitor";
-    dev["name"]           = "LiTime Dual BMS";
-    dev["manufacturer"]   = "LiTime";
-    dev["model"]          = "48V 100Ah Smart ComFlex";
+    dev["identifiers"][0] = deviceId;
+    dev["name"]           = deviceName;
+    if (strcmp(deviceId, "litime_system") == 0) {
+        dev["manufacturer"] = "LiTime / Victron (custom monitor)";
+    } else {
+        dev["manufacturer"] = "LiTime";
+        dev["model"]        = "48V 100Ah Smart ComFlex";
+    }
 
     char payload[512];
     serializeJson(doc, payload, sizeof(payload));
@@ -318,36 +333,36 @@ void MQTTManager::publishHADiscovery(const BatteryData& b1, const BatteryData& b
     snprintf(prefix1, sizeof(prefix1), "%s/battery1", MQTT_TOPIC_BASE);
     snprintf(prefix2, sizeof(prefix2), "%s/battery2", MQTT_TOPIC_BASE);
 
-    // Battery 1
-    _haConfigSensor(prefix1, "Battery 1 SOC",       "soc",          "%",   "battery");
-    _haConfigSensor(prefix1, "Battery 1 Voltage",   "total_voltage","V",   "voltage");
-    _haConfigSensor(prefix1, "Battery 1 Current",   "current",      "A",   "current");
-    _haConfigSensor(prefix1, "Battery 1 Power",     "power",        "W",   "power");
-    _haConfigSensor(prefix1, "Battery 1 Cell Temp", "cell_temp",    "°C",  "temperature");
-    _haConfigSensor(prefix1, "Battery 1 MOS Temp",  "mosfet_temp",  "°C",  "temperature");
-    _haConfigSensor(prefix1, "Battery 1 Remain Ah", "remaining_ah", "Ah",  "");
-    _haConfigSensor(prefix1, "Battery 1 Cell Delta","cell_delta_mv","mV",  "");
-    _haConfigSensor(prefix1, "Battery 1 Time Rem",  "time_remaining_s","s","duration");
+    // Battery 1 — device identifier matches the "LiTime Battery 1" device
+    // used by the homeassistant/mqtt_sensors.yaml package, so these land on
+    // the same device page instead of a separate merged device. Only the
+    // two fields NOT already covered by that YAML package (remaining_ah,
+    // cell_delta_mv) are published here to avoid duplicate entities.
+    _haConfigSensor(prefix1, "Battery 1 Remain Ah", "remaining_ah", "Ah",  "",
+                    "litime_fw_battery1", "litime_battery_1", "LiTime Battery 1");
+    _haConfigSensor(prefix1, "Battery 1 Cell Delta","cell_delta_mv","mV", "",
+                    "litime_fw_battery1", "litime_battery_1", "LiTime Battery 1");
 
-    // Battery 2
-    _haConfigSensor(prefix2, "Battery 2 SOC",       "soc",          "%",   "battery");
-    _haConfigSensor(prefix2, "Battery 2 Voltage",   "total_voltage","V",   "voltage");
-    _haConfigSensor(prefix2, "Battery 2 Current",   "current",      "A",   "current");
-    _haConfigSensor(prefix2, "Battery 2 Power",     "power",        "W",   "power");
-    _haConfigSensor(prefix2, "Battery 2 Cell Temp", "cell_temp",    "°C",  "temperature");
-    _haConfigSensor(prefix2, "Battery 2 MOS Temp",  "mosfet_temp",  "°C",  "temperature");
-    _haConfigSensor(prefix2, "Battery 2 Remain Ah", "remaining_ah", "Ah",  "");
-    _haConfigSensor(prefix2, "Battery 2 Cell Delta","cell_delta_mv","mV",  "");
-    _haConfigSensor(prefix2, "Battery 2 Time Rem",  "time_remaining_s","s","duration");
+    // Battery 2 — device identifier matches "LiTime Battery 2" in the YAML.
+    _haConfigSensor(prefix2, "Battery 2 Remain Ah", "remaining_ah", "Ah",  "",
+                    "litime_fw_battery2", "litime_battery_2", "LiTime Battery 2");
+    _haConfigSensor(prefix2, "Battery 2 Cell Delta","cell_delta_mv","mV", "",
+                    "litime_fw_battery2", "litime_battery_2", "LiTime Battery 2");
 
-    // Combined
+    // Combined — device identifier matches "LiTime System" in the YAML.
     char combPrefix[48];
     snprintf(combPrefix, sizeof(combPrefix), "%s/combined", MQTT_TOPIC_BASE);
-    _haConfigSensor(combPrefix, "Combined Power",     "total_power",     "W", "power");
-    _haConfigSensor(combPrefix, "Combined Current",   "total_current",   "A", "current");
-    _haConfigSensor(combPrefix, "Combined Avg SOC",   "soc_avg",         "%", "battery");
-    _haConfigSensor(combPrefix, "Combined Remain Ah", "total_remaining_ah","Ah","");
-    _haConfigSensor(combPrefix, "Combined Time Rem",  "time_remaining_s","s", "duration");
+    _haConfigSensor(combPrefix, "Combined Power",     "total_power",     "W", "power",
+                    "litime_fw_combined", "litime_system", "LiTime System");
+    _haConfigSensor(combPrefix, "Combined Current",   "total_current",   "A", "current",
+                    "litime_fw_combined", "litime_system", "LiTime System");
+    _haConfigSensor(combPrefix, "Combined Avg SOC",   "soc_avg",         "%", "battery",
+                    "litime_fw_combined", "litime_system", "LiTime System");
+    _haConfigSensor(combPrefix, "Combined Remain Ah", "total_remaining_ah","Ah","",
+                    "litime_fw_combined", "litime_system", "LiTime System");
+    _haConfigSensor(combPrefix, "Combined Time Rem",  "time_remaining_s","s", "duration",
+                    "litime_fw_combined", "litime_system", "LiTime System");
 
     Serial.println("[MQTT] Home Assistant discovery published.");
 }
+

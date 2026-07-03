@@ -34,5 +34,8 @@ private:
     void _publishCombined(const BatteryData& b1, const BatteryData& b2);
     void _haConfigSensor(const char* topicBase, const char* name,
                          const char* valueKey, const char* unit,
-                         const char* devClass);
+                         const char* devClass,
+                         const char* uidPrefix,
+                         const char* deviceId,
+                         const char* deviceName);
 };

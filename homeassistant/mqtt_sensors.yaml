@@ -1,17 +1,31 @@
 # =============================================================================
 #  Home Assistant package: LiTime Dual BMS + Victron MPPT (full MQTT coverage)
 # =============================================================================
-#  The ESP32-S3 firmware already auto-publishes MQTT Discovery for the CORE
-#  battery + combined sensors (SOC, voltage, current, power, cell temp, MOS
-#  temp, remaining Ah, cell delta, time remaining) — those appear automatically
-#  under Settings -> Devices & Services -> MQTT with no YAML needed.
+#  This package makes ALL LiTime + Victron MQTT data visible in Home
+#  Assistant as clean, properly-split devices: "LiTime Battery 1",
+#  "LiTime Battery 2", "LiTime System", and "Victron MPPT".
 #
-#  This file adds everything the auto-discovery does NOT cover:
-#    - The entire Victron MPPT solar controller (auto-discovery for it does
-#      not exist in the firmware at all yet)
-#    - SOH, discharge cycles, cell min/max voltage, protection/balancing/
-#      battery-state text, charge/discharge direction, individual cell
-#      voltages (1-16 per battery), and the "connected"/LWT status sensors
+#  NOTE: older versions of the firmware ALSO auto-published a small subset
+#  of these fields (SOC, voltage, current, power, etc.) via MQTT Discovery,
+#  but a bug meant Battery 1 and Battery 2's discovery configs collided on
+#  the same retained topic, so in practice only one (or neither) battery's
+#  sensors ever actually appeared in Home Assistant. That firmware bug has
+#  since been fixed (each battery now gets its own unique discovery topic
+#  and attaches to the same "LiTime Battery 1"/"LiTime Battery 2" devices
+#  used below) — but you do NOT need to reflash to use this file: every
+#  field is fully duplicated here directly from the raw MQTT state topics,
+#  independent of firmware auto-discovery, so this package alone is
+#  sufficient on its own.
+#
+#  This file provides:
+#    - Full per-battery coverage: voltage, current, power, SOC, cell temp,
+#      MOSFET temp, time remaining, remaining Ah, cell delta, SOH, discharge
+#      cycles, full capacity, cell min/max voltage, protection/balancing/
+#      battery-state text, and all 16 individual cell voltages (3-decimal
+#      resolution) per battery
+#    - The entire Victron MPPT solar controller (no firmware auto-discovery
+#      exists for this at all)
+#    - Combined/system-wide sensors and the "connected"/LWT status sensors
 #
 #  It is written as a Home Assistant "package" so it merges safely alongside
 #  your existing configuration.yaml and any other packages, instead of
@@ -82,6 +96,88 @@ mqtt:
 
   # ── Battery 1 — additional fields not covered by firmware discovery ─────
   sensor:
+    - name: "Battery 1 Voltage"
+      unique_id: litime_battery1_voltage
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.total_voltage }}"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      suggested_display_precision: 3
+      device: *battery1_device
+
+    - name: "Battery 1 Current"
+      unique_id: litime_battery1_current
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.current }}"
+      unit_of_measurement: "A"
+      device_class: current
+      state_class: measurement
+      suggested_display_precision: 3
+      device: *battery1_device
+
+    - name: "Battery 1 Power"
+      unique_id: litime_battery1_power
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.power }}"
+      unit_of_measurement: "W"
+      device_class: power
+      state_class: measurement
+      suggested_display_precision: 1
+      device: *battery1_device
+
+    - name: "Battery 1 SOC"
+      unique_id: litime_battery1_soc
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.soc }}"
+      unit_of_measurement: "%"
+      device_class: battery
+      state_class: measurement
+      device: *battery1_device
+
+    - name: "Battery 1 Cell Temp"
+      unique_id: litime_battery1_cell_temp
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.cell_temp }}"
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement
+      device: *battery1_device
+
+    - name: "Battery 1 MOSFET Temp"
+      unique_id: litime_battery1_mosfet_temp
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.mosfet_temp }}"
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement
+      device: *battery1_device
+
+    - name: "Battery 1 Time Remaining"
+      unique_id: litime_battery1_time_remaining_s
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.time_remaining_s }}"
+      unit_of_measurement: "s"
+      device_class: duration
+      device: *battery1_device
+
+    - name: "Battery 1 Remaining Ah"
+      unique_id: litime_battery1_remaining_ah
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.remaining_ah }}"
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      suggested_display_precision: 2
+      device: *battery1_device
+
+    - name: "Battery 1 Cell Delta"
+      unique_id: litime_battery1_cell_delta_mv
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.cell_delta_mv }}"
+      unit_of_measurement: "mV"
+      state_class: measurement
+      device: *battery1_device
+
     - name: "Battery 1 SOH"
       unique_id: litime_battery1_soh
       state_topic: "litime/battery1/state"
@@ -110,6 +206,7 @@ mqtt:
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
+      suggested_display_precision: 3
       device: *battery1_device
 
     - name: "Battery 1 Cell Max Voltage"
@@ -119,6 +216,7 @@ mqtt:
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
+      suggested_display_precision: 3
       device: *battery1_device
 
     - name: "Battery 1 Time Direction"
@@ -266,6 +364,88 @@ mqtt:
       device: *battery1_device
 
     # ── Battery 2 — additional fields not covered by firmware discovery ───
+    - name: "Battery 2 Voltage"
+      unique_id: litime_battery2_voltage
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.total_voltage }}"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      suggested_display_precision: 3
+      device: *battery2_device
+
+    - name: "Battery 2 Current"
+      unique_id: litime_battery2_current
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.current }}"
+      unit_of_measurement: "A"
+      device_class: current
+      state_class: measurement
+      suggested_display_precision: 3
+      device: *battery2_device
+
+    - name: "Battery 2 Power"
+      unique_id: litime_battery2_power
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.power }}"
+      unit_of_measurement: "W"
+      device_class: power
+      state_class: measurement
+      suggested_display_precision: 1
+      device: *battery2_device
+
+    - name: "Battery 2 SOC"
+      unique_id: litime_battery2_soc
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.soc }}"
+      unit_of_measurement: "%"
+      device_class: battery
+      state_class: measurement
+      device: *battery2_device
+
+    - name: "Battery 2 Cell Temp"
+      unique_id: litime_battery2_cell_temp
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.cell_temp }}"
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement
+      device: *battery2_device
+
+    - name: "Battery 2 MOSFET Temp"
+      unique_id: litime_battery2_mosfet_temp
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.mosfet_temp }}"
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement
+      device: *battery2_device
+
+    - name: "Battery 2 Time Remaining"
+      unique_id: litime_battery2_time_remaining_s
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.time_remaining_s }}"
+      unit_of_measurement: "s"
+      device_class: duration
+      device: *battery2_device
+
+    - name: "Battery 2 Remaining Ah"
+      unique_id: litime_battery2_remaining_ah
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.remaining_ah }}"
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      suggested_display_precision: 2
+      device: *battery2_device
+
+    - name: "Battery 2 Cell Delta"
+      unique_id: litime_battery2_cell_delta_mv
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.cell_delta_mv }}"
+      unit_of_measurement: "mV"
+      state_class: measurement
+      device: *battery2_device
+
     - name: "Battery 2 SOH"
       unique_id: litime_battery2_soh
       state_topic: "litime/battery2/state"
@@ -294,6 +474,7 @@ mqtt:
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
+      suggested_display_precision: 3
       device: *battery2_device
 
     - name: "Battery 2 Cell Max Voltage"
@@ -303,6 +484,7 @@ mqtt:
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
+      suggested_display_precision: 3
       device: *battery2_device
 
     - name: "Battery 2 Time Direction"
