@@ -1,0 +1,566 @@
+# =============================================================================
+#  Home Assistant package: LiTime Dual BMS + Victron MPPT (full MQTT coverage)
+# =============================================================================
+#  The ESP32-S3 firmware already auto-publishes MQTT Discovery for the CORE
+#  battery + combined sensors (SOC, voltage, current, power, cell temp, MOS
+#  temp, remaining Ah, cell delta, time remaining) — those appear automatically
+#  under Settings -> Devices & Services -> MQTT with no YAML needed.
+#
+#  This file adds everything the auto-discovery does NOT cover:
+#    - The entire Victron MPPT solar controller (auto-discovery for it does
+#      not exist in the firmware at all yet)
+#    - SOH, discharge cycles, cell min/max voltage, protection/balancing/
+#      battery-state text, charge/discharge direction, individual cell
+#      voltages (1-16 per battery), and the "connected"/LWT status sensors
+#
+#  It is written as a Home Assistant "package" so it merges safely alongside
+#  your existing configuration.yaml and any other packages, instead of
+#  fighting over a single top-level `mqtt:` key.
+#
+#  ── Install ──────────────────────────────────────────────────────────────
+#  1. Enable packages in configuration.yaml (skip if already enabled):
+#       homeassistant:
+#         packages: !include_dir_named packages
+#  2. Copy this file into  <config>/packages/litime_victron_mqtt.yaml
+#  3. Edit the `litime` / `victron` topic-base values below (Ctrl+F/replace)
+#     if you changed MQTT_TOPIC_BASE / MQTT_VICTRON_TOPIC_BASE in config.h
+#     (defaults are "litime" and "victron" — matches this file as written).
+#  4. Settings -> System -> Restart, or Developer Tools -> YAML -> Check
+#     Configuration then "Reload All YAML Configuration".
+#
+#  All entities below are grouped into 3 devices: "LiTime Battery 1",
+#  "LiTime Battery 2", and "Victron MPPT", plus a virtual "LiTime System"
+#  device for the combined/system-wide sensors.
+# =============================================================================
+
+mqtt:
+  # ── Connectivity (LWT) ────────────────────────────────────────────────────
+  binary_sensor:
+    - name: "LiTime Monitor Online"
+      unique_id: litime_monitor_online
+      state_topic: "litime/status"
+      payload_on: "online"
+      payload_off: "offline"
+      device_class: connectivity
+      device:
+        identifiers: "litime_system"
+        name: "LiTime System"
+        manufacturer: "LiTime / Victron (custom monitor)"
+
+    - name: "Battery 1 Connected"
+      unique_id: litime_battery1_connected
+      state_topic: "litime/battery1/state"
+      value_template: "{{ 'ON' if value_json.connected else 'OFF' }}"
+      device_class: connectivity
+      device: &battery1_device
+        identifiers: "litime_battery_1"
+        name: "LiTime Battery 1"
+        manufacturer: "LiTime"
+        model: "48V 100Ah Smart ComFlex"
+
+    - name: "Battery 2 Connected"
+      unique_id: litime_battery2_connected
+      state_topic: "litime/battery2/state"
+      value_template: "{{ 'ON' if value_json.connected else 'OFF' }}"
+      device_class: connectivity
+      device: &battery2_device
+        identifiers: "litime_battery_2"
+        name: "LiTime Battery 2"
+        manufacturer: "LiTime"
+        model: "48V 100Ah Smart ComFlex"
+
+    - name: "Victron MPPT Data Valid"
+      unique_id: victron_mppt_valid
+      state_topic: "victron/state"
+      value_template: "{{ 'ON' if value_json.valid else 'OFF' }}"
+      device_class: connectivity
+      device: &victron_device
+        identifiers: "victron_mppt"
+        name: "Victron MPPT"
+        manufacturer: "Victron Energy"
+        model: "SmartSolar/BlueSolar MPPT"
+
+  # ── Battery 1 — additional fields not covered by firmware discovery ─────
+  sensor:
+    - name: "Battery 1 SOH"
+      unique_id: litime_battery1_soh
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.soh }}"
+      device: *battery1_device
+
+    - name: "Battery 1 Discharge Cycles"
+      unique_id: litime_battery1_discharge_cycles
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.discharge_cycles }}"
+      state_class: total_increasing
+      device: *battery1_device
+
+    - name: "Battery 1 Full Capacity"
+      unique_id: litime_battery1_full_capacity_ah
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.full_capacity_ah }}"
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      device: *battery1_device
+
+    - name: "Battery 1 Cell Min Voltage"
+      unique_id: litime_battery1_cell_min_v
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.cell_min_v }}"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+
+    - name: "Battery 1 Cell Max Voltage"
+      unique_id: litime_battery1_cell_max_v
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.cell_max_v }}"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+
+    - name: "Battery 1 Time Direction"
+      unique_id: litime_battery1_time_direction
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.time_direction }}"
+      device: *battery1_device
+
+    - name: "Battery 1 Protection"
+      unique_id: litime_battery1_protection
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.protection }}"
+      device: *battery1_device
+
+    - name: "Battery 1 Balancing"
+      unique_id: litime_battery1_balancing
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.balancing }}"
+      device: *battery1_device
+
+    - name: "Battery 1 State"
+      unique_id: litime_battery1_battery_state
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.battery_state }}"
+      device: *battery1_device
+
+    - name: "Battery 1 Heat State"
+      unique_id: litime_battery1_heat_state
+      state_topic: "litime/battery1/state"
+      value_template: "{{ value_json.heat_state }}"
+      device: *battery1_device
+
+    # Individual cell voltages (16S pack) — published on plain (non-JSON) topics
+    - name: "Battery 1 Cell 01 Voltage"
+      unique_id: litime_battery1_cell01_v
+      state_topic: "litime/battery1/cells/cell01"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 02 Voltage"
+      unique_id: litime_battery1_cell02_v
+      state_topic: "litime/battery1/cells/cell02"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 03 Voltage"
+      unique_id: litime_battery1_cell03_v
+      state_topic: "litime/battery1/cells/cell03"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 04 Voltage"
+      unique_id: litime_battery1_cell04_v
+      state_topic: "litime/battery1/cells/cell04"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 05 Voltage"
+      unique_id: litime_battery1_cell05_v
+      state_topic: "litime/battery1/cells/cell05"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 06 Voltage"
+      unique_id: litime_battery1_cell06_v
+      state_topic: "litime/battery1/cells/cell06"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 07 Voltage"
+      unique_id: litime_battery1_cell07_v
+      state_topic: "litime/battery1/cells/cell07"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 08 Voltage"
+      unique_id: litime_battery1_cell08_v
+      state_topic: "litime/battery1/cells/cell08"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 09 Voltage"
+      unique_id: litime_battery1_cell09_v
+      state_topic: "litime/battery1/cells/cell09"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 10 Voltage"
+      unique_id: litime_battery1_cell10_v
+      state_topic: "litime/battery1/cells/cell10"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 11 Voltage"
+      unique_id: litime_battery1_cell11_v
+      state_topic: "litime/battery1/cells/cell11"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 12 Voltage"
+      unique_id: litime_battery1_cell12_v
+      state_topic: "litime/battery1/cells/cell12"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 13 Voltage"
+      unique_id: litime_battery1_cell13_v
+      state_topic: "litime/battery1/cells/cell13"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 14 Voltage"
+      unique_id: litime_battery1_cell14_v
+      state_topic: "litime/battery1/cells/cell14"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 15 Voltage"
+      unique_id: litime_battery1_cell15_v
+      state_topic: "litime/battery1/cells/cell15"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+    - name: "Battery 1 Cell 16 Voltage"
+      unique_id: litime_battery1_cell16_v
+      state_topic: "litime/battery1/cells/cell16"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery1_device
+
+    # ── Battery 2 — additional fields not covered by firmware discovery ───
+    - name: "Battery 2 SOH"
+      unique_id: litime_battery2_soh
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.soh }}"
+      device: *battery2_device
+
+    - name: "Battery 2 Discharge Cycles"
+      unique_id: litime_battery2_discharge_cycles
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.discharge_cycles }}"
+      state_class: total_increasing
+      device: *battery2_device
+
+    - name: "Battery 2 Full Capacity"
+      unique_id: litime_battery2_full_capacity_ah
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.full_capacity_ah }}"
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      device: *battery2_device
+
+    - name: "Battery 2 Cell Min Voltage"
+      unique_id: litime_battery2_cell_min_v
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.cell_min_v }}"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+
+    - name: "Battery 2 Cell Max Voltage"
+      unique_id: litime_battery2_cell_max_v
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.cell_max_v }}"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+
+    - name: "Battery 2 Time Direction"
+      unique_id: litime_battery2_time_direction
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.time_direction }}"
+      device: *battery2_device
+
+    - name: "Battery 2 Protection"
+      unique_id: litime_battery2_protection
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.protection }}"
+      device: *battery2_device
+
+    - name: "Battery 2 Balancing"
+      unique_id: litime_battery2_balancing
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.balancing }}"
+      device: *battery2_device
+
+    - name: "Battery 2 State"
+      unique_id: litime_battery2_battery_state
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.battery_state }}"
+      device: *battery2_device
+
+    - name: "Battery 2 Heat State"
+      unique_id: litime_battery2_heat_state
+      state_topic: "litime/battery2/state"
+      value_template: "{{ value_json.heat_state }}"
+      device: *battery2_device
+
+    # Individual cell voltages (16S pack)
+    - name: "Battery 2 Cell 01 Voltage"
+      unique_id: litime_battery2_cell01_v
+      state_topic: "litime/battery2/cells/cell01"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 02 Voltage"
+      unique_id: litime_battery2_cell02_v
+      state_topic: "litime/battery2/cells/cell02"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 03 Voltage"
+      unique_id: litime_battery2_cell03_v
+      state_topic: "litime/battery2/cells/cell03"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 04 Voltage"
+      unique_id: litime_battery2_cell04_v
+      state_topic: "litime/battery2/cells/cell04"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 05 Voltage"
+      unique_id: litime_battery2_cell05_v
+      state_topic: "litime/battery2/cells/cell05"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 06 Voltage"
+      unique_id: litime_battery2_cell06_v
+      state_topic: "litime/battery2/cells/cell06"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 07 Voltage"
+      unique_id: litime_battery2_cell07_v
+      state_topic: "litime/battery2/cells/cell07"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 08 Voltage"
+      unique_id: litime_battery2_cell08_v
+      state_topic: "litime/battery2/cells/cell08"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 09 Voltage"
+      unique_id: litime_battery2_cell09_v
+      state_topic: "litime/battery2/cells/cell09"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 10 Voltage"
+      unique_id: litime_battery2_cell10_v
+      state_topic: "litime/battery2/cells/cell10"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 11 Voltage"
+      unique_id: litime_battery2_cell11_v
+      state_topic: "litime/battery2/cells/cell11"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 12 Voltage"
+      unique_id: litime_battery2_cell12_v
+      state_topic: "litime/battery2/cells/cell12"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 13 Voltage"
+      unique_id: litime_battery2_cell13_v
+      state_topic: "litime/battery2/cells/cell13"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 14 Voltage"
+      unique_id: litime_battery2_cell14_v
+      state_topic: "litime/battery2/cells/cell14"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 15 Voltage"
+      unique_id: litime_battery2_cell15_v
+      state_topic: "litime/battery2/cells/cell15"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+    - name: "Battery 2 Cell 16 Voltage"
+      unique_id: litime_battery2_cell16_v
+      state_topic: "litime/battery2/cells/cell16"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *battery2_device
+
+    # ── Combined / system-wide (virtual "LiTime System" device) ───────────
+    - name: "Combined SOC Battery 1"
+      unique_id: litime_combined_soc_b1
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.soc_b1 }}"
+      unit_of_measurement: "%"
+      device_class: battery
+      state_class: measurement
+      device: &system_device
+        identifiers: "litime_system"
+        name: "LiTime System"
+        manufacturer: "LiTime / Victron (custom monitor)"
+
+    - name: "Combined SOC Battery 2"
+      unique_id: litime_combined_soc_b2
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.soc_b2 }}"
+      unit_of_measurement: "%"
+      device_class: battery
+      state_class: measurement
+      device: *system_device
+
+    - name: "Combined Full Capacity"
+      unique_id: litime_combined_capacity_ah
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.total_capacity_ah }}"
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      device: *system_device
+
+    - name: "Combined Time Direction"
+      unique_id: litime_combined_time_direction
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.time_direction }}"
+      device: *system_device
+
+    - name: "Combined Flow"
+      unique_id: litime_combined_flow
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.flow }}"
+      icon: mdi:swap-horizontal
+      device: *system_device
+
+    # ── Victron MPPT — full coverage (no firmware auto-discovery exists yet) ─
+    - name: "MPPT Charger State"
+      unique_id: victron_mppt_state_str
+      state_topic: "victron/state"
+      value_template: "{{ value_json.state_str }}"
+      icon: mdi:solar-power-variant
+      device: *victron_device
+
+    - name: "MPPT Charger State Code"
+      unique_id: victron_mppt_state_code
+      state_topic: "victron/state"
+      value_template: "{{ value_json.state }}"
+      entity_category: diagnostic
+      device: *victron_device
+
+    - name: "MPPT Error"
+      unique_id: victron_mppt_error_str
+      state_topic: "victron/state"
+      value_template: "{{ value_json.error_str }}"
+      icon: mdi:alert-circle-outline
+      device: *victron_device
+
+    - name: "MPPT Error Code"
+      unique_id: victron_mppt_error_code
+      state_topic: "victron/state"
+      value_template: "{{ value_json.error }}"
+      entity_category: diagnostic
+      device: *victron_device
+
+    - name: "MPPT Battery Voltage"
+      unique_id: victron_mppt_batt_v
+      state_topic: "victron/state"
+      value_template: "{{ value_json.batt_v }}"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      device: *victron_device
+
+    - name: "MPPT Battery Current"
+      unique_id: victron_mppt_batt_a
+      state_topic: "victron/state"
+      value_template: "{{ value_json.batt_a }}"
+      unit_of_measurement: "A"
+      device_class: current
+      state_class: measurement
+      device: *victron_device
+
+    - name: "MPPT PV Power"
+      unique_id: victron_mppt_pv_w
+      state_topic: "victron/state"
+      value_template: "{{ value_json.pv_w }}"
+      unit_of_measurement: "W"
+      device_class: power
+      state_class: measurement
+      device: *victron_device
+
+    - name: "MPPT Yield Today"
+      unique_id: victron_mppt_yield_today
+      state_topic: "victron/state"
+      value_template: "{{ value_json.yield_today }}"
+      unit_of_measurement: "kWh"
+      device_class: energy
+      state_class: total_increasing
+      device: *victron_device
+
+    - name: "MPPT Last Seen"
+      unique_id: victron_mppt_last_seen_s
+      state_topic: "victron/state"
+      value_template: "{{ value_json.last_seen_s }}"
+      unit_of_measurement: "s"
+      entity_category: diagnostic
+      device: *victron_device

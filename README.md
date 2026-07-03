@@ -407,15 +407,48 @@ litime/status              "online" / "offline"
 
 ## Home Assistant Integration
 
-The firmware auto-publishes MQTT discovery messages on first connect.
-Entities appear automatically under **Settings → Devices & Services → MQTT**.
+The firmware auto-publishes MQTT discovery messages on first connect for the
+**core battery + combined sensors only**. These appear automatically under
+**Settings → Devices & Services → MQTT** with zero configuration:
 
-Key entities created:
 - `sensor.battery_1_soc` (%), `voltage` (V), `current` (A), `power` (W)
-- `sensor.battery_1_cell_temp` (°C), `remain_ah` (Ah), `time_rem` (s), `cell_delta` (mV)
-- *(same for Battery 2)*
-- `sensor.combined_power` (W), `combined_avg_soc` (%), `combined_time_rem` (s)
-- Victron MPPT sensors (state, PV power, battery V/A, yield today, error)
+- `sensor.battery_1_cell_temp` (°C), `mos_temp` (°C), `remain_ah` (Ah), `time_rem` (s), `cell_delta` (mV)
+- *(same set for Battery 2)*
+- `sensor.combined_power` (W), `combined_current` (A), `combined_avg_soc` (%), `combined_remain_ah` (Ah), `combined_time_rem` (s)
+
+> **Not yet auto-discovered:** the firmware does **not** currently publish HA
+> discovery for the Victron MPPT at all, nor for several extra battery fields
+> (SOH, discharge cycles, cell min/max voltage, protection/balancing/state
+> text, individual per-cell voltages, charge/discharge direction). Use the
+> full manual YAML package below for complete coverage of everything this
+> project publishes to MQTT.
+
+### Full MQTT sensor coverage (YAML package)
+
+A ready-to-use Home Assistant **package** file covering every topic this
+project publishes — including the entire Victron MPPT (state, error, battery
+V/A, PV power, yield today) and all the extra battery fields above — is
+provided at
+[`homeassistant/mqtt_sensors.yaml`](homeassistant/mqtt_sensors.yaml).
+
+**Install:**
+1. Enable packages in `configuration.yaml` (skip if already enabled):
+   ```yaml
+   homeassistant:
+     packages: !include_dir_named packages
+   ```
+2. Copy [`homeassistant/mqtt_sensors.yaml`](homeassistant/mqtt_sensors.yaml)
+   into `<ha-config>/packages/litime_victron_mqtt.yaml`.
+3. If you changed `MQTT_TOPIC_BASE` / `MQTT_VICTRON_TOPIC_BASE` from the
+   defaults (`litime` / `victron`) in `config.h`, update the topic strings
+   in the copied file to match.
+4. **Developer Tools → YAML → Check Configuration**, then **Restart** (or
+   Reload All YAML Configuration if no restart-only changes are pending).
+
+This adds three devices — **LiTime Battery 1**, **LiTime Battery 2**, and
+**Victron MPPT** — plus a virtual **LiTime System** device for the combined
+pack metrics, with entities for every field published over MQTT, including
+all 16 individual cell voltages per battery.
 
 ---
 
