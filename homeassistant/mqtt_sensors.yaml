@@ -157,11 +157,23 @@ mqtt:
       device: *battery1_device
 
     - name: "Battery 1 Time Remaining"
+      unique_id: litime_battery1_time_remaining_text
+      state_topic: "litime/battery1/state"
+      value_template: >-
+        {{ 'Idle' if (value_json.time_direction == 'idle' or (value_json.time_remaining_s | int(0)) <= 0) else
+           ((value_json.time_remaining_s | int(0) // 3600) ~ 'h ' ~
+            '%02d' | format((value_json.time_remaining_s | int(0) % 3600) // 60) ~ 'm ' ~
+            ('to Full' if value_json.time_direction == 'to_full' else 'to Reserve')) }}
+      icon: mdi:timer-outline
+      device: *battery1_device
+
+    - name: "Battery 1 Time Remaining (Raw)"
       unique_id: litime_battery1_time_remaining_s
       state_topic: "litime/battery1/state"
       value_template: "{{ value_json.time_remaining_s }}"
       unit_of_measurement: "s"
       device_class: duration
+      entity_category: diagnostic
       device: *battery1_device
 
     - name: "Battery 1 Remaining Ah"
@@ -179,7 +191,7 @@ mqtt:
       value_template: "{{ value_json.cell_delta_mv }}"
       unit_of_measurement: "mV"
       state_class: measurement
-      suggested_display_precision: 3
+      suggested_display_precision: 1
       device: *battery1_device
 
     - name: "Battery 1 SOH"
@@ -227,31 +239,64 @@ mqtt:
     - name: "Battery 1 Time Direction"
       unique_id: litime_battery1_time_direction
       state_topic: "litime/battery1/state"
-      value_template: "{{ value_json.time_direction }}"
+      value_template: >-
+        {{ 'Charging (to Full)' if value_json.time_direction == 'to_full' else
+           ('Discharging (to Reserve)' if value_json.time_direction == 'to_empty' else 'Idle') }}
+      icon: mdi:swap-vertical-bold
       device: *battery1_device
 
     - name: "Battery 1 Protection"
       unique_id: litime_battery1_protection
       state_topic: "litime/battery1/state"
-      value_template: "{{ value_json.protection }}"
+      value_template: >-
+        {%- set n = value_json.protection | int(0, 16) -%}
+        {%- set names = ['Cell Overvoltage','Cell Undervoltage','Pack Overvoltage','Pack Undervoltage','Charge Over Temp','Charge Under Temp','Discharge Over Temp','Discharge Under Temp','Charge Overcurrent','Discharge Overcurrent','Short Circuit','IC Error','Software Lock'] -%}
+        {%- set ns = namespace(active=[]) -%}
+        {%- for i in range(names | length) -%}
+          {%- if (n // (2 ** i)) % 2 == 1 -%}
+            {%- set ns.active = ns.active + [names[i]] -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ ns.active | join(', ') if ns.active else 'OK (No Faults)' }}
+      icon: mdi:shield-alert-outline
       device: *battery1_device
 
     - name: "Battery 1 Balancing"
       unique_id: litime_battery1_balancing
       state_topic: "litime/battery1/state"
-      value_template: "{{ value_json.balancing }}"
+      value_template: >-
+        {%- set s = value_json.balancing | string -%}
+        {%- set ns = namespace(active=[]) -%}
+        {%- for i in range(s | length) -%}
+          {%- if s[i] == '1' -%}
+            {%- set ns.active = ns.active + ['Cell ' ~ (i + 1)] -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ ns.active | join(', ') if ns.active else 'None' }}
+      icon: mdi:scale-balance
       device: *battery1_device
 
     - name: "Battery 1 State"
       unique_id: litime_battery1_battery_state
       state_topic: "litime/battery1/state"
-      value_template: "{{ value_json.battery_state }}"
+      value_template: >-
+        {%- set n = value_json.battery_state | int(0, 16) -%}
+        {%- set ns = namespace(active=[]) -%}
+        {%- if (n // 1) % 2 == 1 -%}{%- set ns.active = ns.active + ['Charging'] -%}{%- endif -%}
+        {%- if (n // 2) % 2 == 1 -%}{%- set ns.active = ns.active + ['Discharging'] -%}{%- endif -%}
+        {%- if (n // 4) % 2 == 1 -%}{%- set ns.active = ns.active + ['Balancing'] -%}{%- endif -%}
+        {%- if (n // 8) % 2 == 1 -%}{%- set ns.active = ns.active + ['Full'] -%}{%- endif -%}
+        {%- if (n // 64) % 2 == 1 -%}{%- set ns.active = ns.active + ['Heating'] -%}{%- endif -%}
+        {{ ns.active | join(' + ') if ns.active else 'Idle' }}
+      icon: mdi:battery-heart-variant
       device: *battery1_device
 
     - name: "Battery 1 Heat State"
       unique_id: litime_battery1_heat_state
       state_topic: "litime/battery1/state"
-      value_template: "{{ value_json.heat_state }}"
+      value_template: >-
+        {{ 'Heating Active' if (value_json.heat_state | int(0, 16)) != 0 else 'Idle' }}
+      icon: mdi:radiator
       device: *battery1_device
 
     # Individual cell voltages (16S pack) — published on plain (non-JSON) topics
@@ -446,11 +491,23 @@ mqtt:
       device: *battery2_device
 
     - name: "Battery 2 Time Remaining"
+      unique_id: litime_battery2_time_remaining_text
+      state_topic: "litime/battery2/state"
+      value_template: >-
+        {{ 'Idle' if (value_json.time_direction == 'idle' or (value_json.time_remaining_s | int(0)) <= 0) else
+           ((value_json.time_remaining_s | int(0) // 3600) ~ 'h ' ~
+            '%02d' | format((value_json.time_remaining_s | int(0) % 3600) // 60) ~ 'm ' ~
+            ('to Full' if value_json.time_direction == 'to_full' else 'to Reserve')) }}
+      icon: mdi:timer-outline
+      device: *battery2_device
+
+    - name: "Battery 2 Time Remaining (Raw)"
       unique_id: litime_battery2_time_remaining_s
       state_topic: "litime/battery2/state"
       value_template: "{{ value_json.time_remaining_s }}"
       unit_of_measurement: "s"
       device_class: duration
+      entity_category: diagnostic
       device: *battery2_device
 
     - name: "Battery 2 Remaining Ah"
@@ -468,7 +525,7 @@ mqtt:
       value_template: "{{ value_json.cell_delta_mv }}"
       unit_of_measurement: "mV"
       state_class: measurement
-      suggested_display_precision: 3
+      suggested_display_precision: 1
       device: *battery2_device
 
     - name: "Battery 2 SOH"
@@ -516,31 +573,64 @@ mqtt:
     - name: "Battery 2 Time Direction"
       unique_id: litime_battery2_time_direction
       state_topic: "litime/battery2/state"
-      value_template: "{{ value_json.time_direction }}"
+      value_template: >-
+        {{ 'Charging (to Full)' if value_json.time_direction == 'to_full' else
+           ('Discharging (to Reserve)' if value_json.time_direction == 'to_empty' else 'Idle') }}
+      icon: mdi:swap-vertical-bold
       device: *battery2_device
 
     - name: "Battery 2 Protection"
       unique_id: litime_battery2_protection
       state_topic: "litime/battery2/state"
-      value_template: "{{ value_json.protection }}"
+      value_template: >-
+        {%- set n = value_json.protection | int(0, 16) -%}
+        {%- set names = ['Cell Overvoltage','Cell Undervoltage','Pack Overvoltage','Pack Undervoltage','Charge Over Temp','Charge Under Temp','Discharge Over Temp','Discharge Under Temp','Charge Overcurrent','Discharge Overcurrent','Short Circuit','IC Error','Software Lock'] -%}
+        {%- set ns = namespace(active=[]) -%}
+        {%- for i in range(names | length) -%}
+          {%- if (n // (2 ** i)) % 2 == 1 -%}
+            {%- set ns.active = ns.active + [names[i]] -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ ns.active | join(', ') if ns.active else 'OK (No Faults)' }}
+      icon: mdi:shield-alert-outline
       device: *battery2_device
 
     - name: "Battery 2 Balancing"
       unique_id: litime_battery2_balancing
       state_topic: "litime/battery2/state"
-      value_template: "{{ value_json.balancing }}"
+      value_template: >-
+        {%- set s = value_json.balancing | string -%}
+        {%- set ns = namespace(active=[]) -%}
+        {%- for i in range(s | length) -%}
+          {%- if s[i] == '1' -%}
+            {%- set ns.active = ns.active + ['Cell ' ~ (i + 1)] -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ ns.active | join(', ') if ns.active else 'None' }}
+      icon: mdi:scale-balance
       device: *battery2_device
 
     - name: "Battery 2 State"
       unique_id: litime_battery2_battery_state
       state_topic: "litime/battery2/state"
-      value_template: "{{ value_json.battery_state }}"
+      value_template: >-
+        {%- set n = value_json.battery_state | int(0, 16) -%}
+        {%- set ns = namespace(active=[]) -%}
+        {%- if (n // 1) % 2 == 1 -%}{%- set ns.active = ns.active + ['Charging'] -%}{%- endif -%}
+        {%- if (n // 2) % 2 == 1 -%}{%- set ns.active = ns.active + ['Discharging'] -%}{%- endif -%}
+        {%- if (n // 4) % 2 == 1 -%}{%- set ns.active = ns.active + ['Balancing'] -%}{%- endif -%}
+        {%- if (n // 8) % 2 == 1 -%}{%- set ns.active = ns.active + ['Full'] -%}{%- endif -%}
+        {%- if (n // 64) % 2 == 1 -%}{%- set ns.active = ns.active + ['Heating'] -%}{%- endif -%}
+        {{ ns.active | join(' + ') if ns.active else 'Idle' }}
+      icon: mdi:battery-heart-variant
       device: *battery2_device
 
     - name: "Battery 2 Heat State"
       unique_id: litime_battery2_heat_state
       state_topic: "litime/battery2/state"
-      value_template: "{{ value_json.heat_state }}"
+      value_template: >-
+        {{ 'Heating Active' if (value_json.heat_state | int(0, 16)) != 0 else 'Idle' }}
+      icon: mdi:radiator
       device: *battery2_device
 
     # Individual cell voltages (16S pack)
@@ -706,13 +796,18 @@ mqtt:
     - name: "Combined Time Direction"
       unique_id: litime_combined_time_direction
       state_topic: "litime/combined/state"
-      value_template: "{{ value_json.time_direction }}"
+      value_template: >-
+        {{ 'Charging (to Full)' if value_json.time_direction == 'to_full' else
+           ('Discharging (to Reserve)' if value_json.time_direction == 'to_empty' else 'Idle') }}
+      icon: mdi:swap-vertical-bold
       device: *system_device
 
     - name: "Combined Flow"
       unique_id: litime_combined_flow
       state_topic: "litime/combined/state"
-      value_template: "{{ value_json.flow }}"
+      value_template: >-
+        {{ 'Charging' if value_json.flow == 'charging' else
+           ('Discharging' if value_json.flow == 'discharging' else 'Idle') }}
       icon: mdi:swap-horizontal
       device: *system_device
 
