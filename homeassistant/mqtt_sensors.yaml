@@ -764,7 +764,7 @@ mqtt:
       device: *battery2_device
 
     # ── Combined / system-wide (virtual "LiTime System" device) ───────────
-    - name: "Combined SOC Battery 1"
+    - name: "Combined Battery 1 SOC"
       unique_id: litime_combined_soc_b1
       state_topic: "litime/combined/state"
       value_template: "{{ value_json.soc_b1 }}"
@@ -776,7 +776,7 @@ mqtt:
         name: "LiTime System"
         manufacturer: "LiTime / Victron (custom monitor)"
 
-    - name: "Combined SOC Battery 2"
+    - name: "Combined Battery 2 SOC"
       unique_id: litime_combined_soc_b2
       state_topic: "litime/combined/state"
       value_template: "{{ value_json.soc_b2 }}"
@@ -802,6 +802,26 @@ mqtt:
       icon: mdi:swap-vertical-bold
       device: *system_device
 
+    - name: "Combined Time Remaining"
+      unique_id: litime_combined_time_remaining_text
+      state_topic: "litime/combined/state"
+      value_template: >-
+        {{ 'Idle' if (value_json.time_direction == 'idle' or (value_json.time_remaining_s | int(0)) <= 0) else
+           ((value_json.time_remaining_s | int(0) // 3600) ~ 'h ' ~
+            '%02d' | format((value_json.time_remaining_s | int(0) % 3600) // 60) ~ 'm ' ~
+            ('to Full' if value_json.time_direction == 'to_full' else 'to Reserve')) }}
+      icon: mdi:timer-outline
+      device: *system_device
+
+    - name: "Combined Time Remaining (Raw)"
+      unique_id: litime_combined_time_remaining_s
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.time_remaining_s }}"
+      unit_of_measurement: "s"
+      device_class: duration
+      entity_category: diagnostic
+      device: *system_device
+
     - name: "Combined Flow"
       unique_id: litime_combined_flow
       state_topic: "litime/combined/state"
@@ -810,6 +830,7 @@ mqtt:
            ('Discharging' if value_json.flow == 'discharging' else 'Idle') }}
       icon: mdi:swap-horizontal
       device: *system_device
+
 
     # ── Victron MPPT — full coverage (no firmware auto-discovery exists yet) ─
     - name: "MPPT Charger State"
