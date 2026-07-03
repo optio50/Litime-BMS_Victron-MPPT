@@ -1678,15 +1678,16 @@ class Window(QMainWindow):
                 )
             if vict.get("valid"):
                 mppt_err_code = vict.get("error", 0)
+                mppt_state_s  = decode_mppt_state(vict.get("state", 0))
                 mppt_line = (
-                    f"MPPT │ State:{decode_mppt_state(vict.get('state', 0))}  "
+                    f"MPPT │ State:{mppt_state_s}  "
                     f"PV:{vict.get('pv_w',0):.0f}W  "
                     f"Batt:{vict.get('batt_v',0):.2f}V {vict.get('batt_a',0):+.1f}A  "
                     f"Yield:{vict.get('yield_today',0):.3f}kWh"
                 )
                 if mppt_err_code:
                     mppt_line += f"  {decode_mppt_error(mppt_err_code)}"
-                self._log(mppt_line, C_CYAN)
+                self._log(mppt_line, MPPT_STATE_COLORS.get(mppt_state_s, C_CYAN))
 
     def _log(self, msg: str, color: str = C_TEXT):
         ts = datetime.now().strftime("%a %d %b %Y %I:%M:%S %p")
