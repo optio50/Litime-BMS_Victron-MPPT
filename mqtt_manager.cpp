@@ -6,7 +6,7 @@
 #include "victron_mppt.h"        // for VictronData + victronStateStr/victronErrorStr + VictronScanResult
 
 MQTTManager::MQTTManager()
-    : _mqtt(_wifiClient), _haDiscoverySent(false) {}
+    : _mqtt(_wifiClient) {}
 
 // ---------------------------------------------------------------------------
 void MQTTManager::begin() {
@@ -46,7 +46,6 @@ bool MQTTManager::_reconnect() {
     if (ok) {
         Serial.println("[MQTT] Connected.");
         _mqtt.publish(lwtTopic, "online", true);
-        _haDiscoverySent = false;  // re-send discovery after reconnect
     } else {
         Serial.printf("[MQTT] Failed, rc=%d\n", _mqtt.state());
     }
@@ -65,11 +64,6 @@ void MQTTManager::publishAll(const BatteryData& b1, const BatteryData& b2) {
     _publishBattery(b2, prefix, 1);
 
     _publishCombined(b1, b2);
-
-    if (!_haDiscoverySent) {
-        publishHADiscovery(b1, b2);
-        _haDiscoverySent = true;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,54 +275,18 @@ void MQTTManager::publishVictron(const VictronData& v) {
 // ---------------------------------------------------------------------------
 // Home Assistant integration
 //
-// This project no longer publishes MQTT Discovery from the firmware itself.
-// It used to (for a small subset of fields), but that had two problems:
-//   1. A bug where Battery 1 and Battery 2's discovery configs collided on
-//      the same retained MQTT topic, so only one battery's sensors (merged
-//      into a single device) ever actually appeared in Home Assistant.
-//   2. Once fixed, it would have published duplicate entities alongside the
-//      homeassistant/mqtt_sensors.yaml package (which fully covers every
-//      field — including these — under cleanly-split, correctly-named
-//      devices), confusing users with two near-identical sensors per value.
-//
-// Rather than maintain two overlapping sources of truth, all Home Assistant
-// entities now come from the single YAML package. See
+// This project does NOT publish MQTT Discovery from the firmware. All Home
+// Assistant entities come from a single static YAML package instead — see
 // homeassistant/mqtt_sensors.yaml and the README's "Home Assistant
-// Integration" section for install instructions.
+// Integration" section. Firmware-side discovery was tried and removed: it
+// only ever covered a subset of fields, had a device-merging bug, and once
+// fixed would have duplicated entities already provided by the YAML package.
+// Having one static, complete source of truth is simpler and avoids stale/
+// duplicate retained discovery topics living on the broker indefinitely.
 //
-// Because MQTT discovery messages are published with retain=true, simply
-// removing the code that publishes them does NOT remove them from the
-// broker — retained messages persist until something overwrites them with
-// an empty payload. So this function actively clears every discovery topic
-// this firmware has ever published (across both the original buggy version
-// and the interim per-battery-uid fix), by publishing an empty retained
-// payload to each. This runs once per connection; harmless/no-op if those
-// topics were never used on your broker.
+// If your broker still has old discovery topics retained from a firmware
+// version prior to this change, see tools/clear_ha_discovery.py to remove
+// them (one-time, run from your PC — not something the firmware should do
+// on every boot/reconnect, since retained-message cleanup only needs to
+// happen once, ever).
 // ---------------------------------------------------------------------------
-void MQTTManager::publishHADiscovery(const BatteryData& b1, const BatteryData& b2) {
-    (void)b1; (void)b2;
-    if (_haDiscoverySent) return;  // only run the cleanup once per connection
-
-    const char* legacyUids[] = {
-        // --- original buggy version (shared "litime_<field>" uids) ---
-        "litime_soc", "litime_total_voltage", "litime_current", "litime_power",
-        "litime_cell_temp", "litime_mosfet_temp", "litime_remaining_ah",
-        "litime_cell_delta_mv", "litime_time_remaining_s",
-        "litime_total_power", "litime_total_current", "litime_soc_avg",
-        "litime_total_remaining_ah",
-        // --- interim per-battery-uid fix ---
-        "litime_fw_battery1_remaining_ah", "litime_fw_battery1_cell_delta_mv",
-        "litime_fw_battery2_remaining_ah", "litime_fw_battery2_cell_delta_mv",
-        "litime_fw_combined_total_power", "litime_fw_combined_total_current",
-        "litime_fw_combined_soc_avg", "litime_fw_combined_total_remaining_ah",
-        "litime_fw_combined_time_remaining_s",
-    };
-    char topic[128];
-    for (const char* uid : legacyUids) {
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/config", uid);
-        _mqtt.publish(topic, "", true);  // empty retained payload = delete
-    }
-    Serial.println("[MQTT] Cleared legacy Home Assistant discovery topics "
-                    "(entities now come from homeassistant/mqtt_sensors.yaml).");
-}
-
