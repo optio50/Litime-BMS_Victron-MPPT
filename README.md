@@ -31,9 +31,13 @@ dashboard app.
 ## Screenshots
 
 ![Overview tab](images/screenshot-01-overview.png)
+
 ![Battery 1 tab](images/screenshot-02-battery1.png)
+
 ![Battery 2 tab](images/screenshot-03-battery2.png)
+
 ![MPPT tab](images/screenshot-04-mppt.png)
+
 ![Log tab](images/screenshot-05-log.png)
 
 ---
