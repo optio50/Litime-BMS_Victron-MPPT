@@ -21,7 +21,8 @@ public:
     // Publish Victron MPPT decoded data to victron/state and flat topics
     void publishVictron(const VictronData& v);
 
-    // Publish Home-Assistant MQTT discovery messages (call once after connect)
+    // Deprecated no-op (kept for API stability). Home Assistant entities are
+    // now provided entirely by homeassistant/mqtt_sensors.yaml — see README.
     void publishHADiscovery(const BatteryData& b1, const BatteryData& b2);
 
 private:
@@ -32,10 +33,4 @@ private:
     bool _reconnect();
     void _publishBattery(const BatteryData& b, const char* topicPrefix, uint8_t idx);
     void _publishCombined(const BatteryData& b1, const BatteryData& b2);
-    void _haConfigSensor(const char* topicBase, const char* name,
-                         const char* valueKey, const char* unit,
-                         const char* devClass,
-                         const char* uidPrefix,
-                         const char* deviceId,
-                         const char* deviceName);
 };

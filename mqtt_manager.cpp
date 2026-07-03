@@ -279,90 +279,56 @@ void MQTTManager::publishVictron(const VictronData& v) {
 }
 
 // ---------------------------------------------------------------------------
-// Publish Home Assistant MQTT discovery for key sensors
+// Home Assistant integration
 //
-// NOTE: uid/deviceId are caller-supplied and MUST be unique per battery
-// (previously this used only `valueKey` for the unique_id and a single
-// shared device identifier for both batteries, which meant Battery 1 and
-// Battery 2's discovery configs collided on the exact same retained MQTT
-// topic — Battery 2's config silently overwrote Battery 1's, so only one
-// battery's worth of sensors, merged under one "LiTime Dual BMS" device,
-// ever actually showed up in Home Assistant).
+// This project no longer publishes MQTT Discovery from the firmware itself.
+// It used to (for a small subset of fields), but that had two problems:
+//   1. A bug where Battery 1 and Battery 2's discovery configs collided on
+//      the same retained MQTT topic, so only one battery's sensors (merged
+//      into a single device) ever actually appeared in Home Assistant.
+//   2. Once fixed, it would have published duplicate entities alongside the
+//      homeassistant/mqtt_sensors.yaml package (which fully covers every
+//      field — including these — under cleanly-split, correctly-named
+//      devices), confusing users with two near-identical sensors per value.
+//
+// Rather than maintain two overlapping sources of truth, all Home Assistant
+// entities now come from the single YAML package. See
+// homeassistant/mqtt_sensors.yaml and the README's "Home Assistant
+// Integration" section for install instructions.
+//
+// Because MQTT discovery messages are published with retain=true, simply
+// removing the code that publishes them does NOT remove them from the
+// broker — retained messages persist until something overwrites them with
+// an empty payload. So this function actively clears every discovery topic
+// this firmware has ever published (across both the original buggy version
+// and the interim per-battery-uid fix), by publishing an empty retained
+// payload to each. This runs once per connection; harmless/no-op if those
+// topics were never used on your broker.
 // ---------------------------------------------------------------------------
-void MQTTManager::_haConfigSensor(const char* topicBase, const char* name,
-                                   const char* valueKey, const char* unit,
-                                   const char* devClass,
-                                   const char* uidPrefix,
-                                   const char* deviceId,
-                                   const char* deviceName) {
-    char uid[64];
-    snprintf(uid, sizeof(uid), "%s_%s", uidPrefix, valueKey);
-
-    char stateTopic[80];
-    snprintf(stateTopic, sizeof(stateTopic), "%s/state", topicBase);
-
-    JsonDocument doc;
-    doc["name"]               = name;
-    doc["unique_id"]          = uid;
-    doc["state_topic"]        = stateTopic;
-    doc["value_template"]     = String("{{ value_json.") + valueKey + " }}";
-    if (unit && strlen(unit) > 0)     doc["unit_of_measurement"] = unit;
-    if (devClass && strlen(devClass) > 0) doc["device_class"]    = devClass;
-
-    JsonObject dev = doc["device"].to<JsonObject>();
-    dev["identifiers"][0] = deviceId;
-    dev["name"]           = deviceName;
-    if (strcmp(deviceId, "litime_system") == 0) {
-        dev["manufacturer"] = "LiTime / Victron (custom monitor)";
-    } else {
-        dev["manufacturer"] = "LiTime";
-        dev["model"]        = "48V 100Ah Smart ComFlex";
-    }
-
-    char payload[512];
-    serializeJson(doc, payload, sizeof(payload));
-
-    char topic[128];
-    snprintf(topic, sizeof(topic),
-             "homeassistant/sensor/%s/config", uid);
-    _mqtt.publish(topic, payload, true);
-}
-
 void MQTTManager::publishHADiscovery(const BatteryData& b1, const BatteryData& b2) {
-    char prefix1[48], prefix2[48];
-    snprintf(prefix1, sizeof(prefix1), "%s/battery1", MQTT_TOPIC_BASE);
-    snprintf(prefix2, sizeof(prefix2), "%s/battery2", MQTT_TOPIC_BASE);
+    (void)b1; (void)b2;
+    if (_haDiscoverySent) return;  // only run the cleanup once per connection
 
-    // Battery 1 — device identifier matches the "LiTime Battery 1" device
-    // used by the homeassistant/mqtt_sensors.yaml package, so these land on
-    // the same device page instead of a separate merged device. Only the
-    // two fields NOT already covered by that YAML package (remaining_ah,
-    // cell_delta_mv) are published here to avoid duplicate entities.
-    _haConfigSensor(prefix1, "Battery 1 Remain Ah", "remaining_ah", "Ah",  "",
-                    "litime_fw_battery1", "litime_battery_1", "LiTime Battery 1");
-    _haConfigSensor(prefix1, "Battery 1 Cell Delta","cell_delta_mv","mV", "",
-                    "litime_fw_battery1", "litime_battery_1", "LiTime Battery 1");
-
-    // Battery 2 — device identifier matches "LiTime Battery 2" in the YAML.
-    _haConfigSensor(prefix2, "Battery 2 Remain Ah", "remaining_ah", "Ah",  "",
-                    "litime_fw_battery2", "litime_battery_2", "LiTime Battery 2");
-    _haConfigSensor(prefix2, "Battery 2 Cell Delta","cell_delta_mv","mV", "",
-                    "litime_fw_battery2", "litime_battery_2", "LiTime Battery 2");
-
-    // Combined — device identifier matches "LiTime System" in the YAML.
-    char combPrefix[48];
-    snprintf(combPrefix, sizeof(combPrefix), "%s/combined", MQTT_TOPIC_BASE);
-    _haConfigSensor(combPrefix, "Combined Power",     "total_power",     "W", "power",
-                    "litime_fw_combined", "litime_system", "LiTime System");
-    _haConfigSensor(combPrefix, "Combined Current",   "total_current",   "A", "current",
-                    "litime_fw_combined", "litime_system", "LiTime System");
-    _haConfigSensor(combPrefix, "Combined Avg SOC",   "soc_avg",         "%", "battery",
-                    "litime_fw_combined", "litime_system", "LiTime System");
-    _haConfigSensor(combPrefix, "Combined Remain Ah", "total_remaining_ah","Ah","",
-                    "litime_fw_combined", "litime_system", "LiTime System");
-    _haConfigSensor(combPrefix, "Combined Time Rem",  "time_remaining_s","s", "duration",
-                    "litime_fw_combined", "litime_system", "LiTime System");
-
-    Serial.println("[MQTT] Home Assistant discovery published.");
+    const char* legacyUids[] = {
+        // --- original buggy version (shared "litime_<field>" uids) ---
+        "litime_soc", "litime_total_voltage", "litime_current", "litime_power",
+        "litime_cell_temp", "litime_mosfet_temp", "litime_remaining_ah",
+        "litime_cell_delta_mv", "litime_time_remaining_s",
+        "litime_total_power", "litime_total_current", "litime_soc_avg",
+        "litime_total_remaining_ah",
+        // --- interim per-battery-uid fix ---
+        "litime_fw_battery1_remaining_ah", "litime_fw_battery1_cell_delta_mv",
+        "litime_fw_battery2_remaining_ah", "litime_fw_battery2_cell_delta_mv",
+        "litime_fw_combined_total_power", "litime_fw_combined_total_current",
+        "litime_fw_combined_soc_avg", "litime_fw_combined_total_remaining_ah",
+        "litime_fw_combined_time_remaining_s",
+    };
+    char topic[128];
+    for (const char* uid : legacyUids) {
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/config", uid);
+        _mqtt.publish(topic, "", true);  // empty retained payload = delete
+    }
+    Serial.println("[MQTT] Cleared legacy Home Assistant discovery topics "
+                    "(entities now come from homeassistant/mqtt_sensors.yaml).");
 }
 

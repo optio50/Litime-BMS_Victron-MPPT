@@ -407,29 +407,29 @@ litime/status              "online" / "offline"
 
 ## Home Assistant Integration
 
-The firmware auto-publishes MQTT discovery messages on first connect for the
-**core battery + combined sensors only**. These appear automatically under
-**Settings → Devices & Services → MQTT** with zero configuration:
-
-- `sensor.battery_1_soc` (%), `voltage` (V), `current` (A), `power` (W)
-- `sensor.battery_1_cell_temp` (°C), `mos_temp` (°C), `remain_ah` (Ah), `time_rem` (s), `cell_delta` (mV)
-- *(same set for Battery 2)*
-- `sensor.combined_power` (W), `combined_current` (A), `combined_avg_soc` (%), `combined_remain_ah` (Ah), `combined_time_rem` (s)
-
-> **Not yet auto-discovered:** the firmware does **not** currently publish HA
-> discovery for the Victron MPPT at all, nor for several extra battery fields
-> (SOH, discharge cycles, cell min/max voltage, protection/balancing/state
-> text, individual per-cell voltages, charge/discharge direction). Use the
-> full manual YAML package below for complete coverage of everything this
-> project publishes to MQTT.
+All Home Assistant entities for this project come from **one MQTT package
+file** — the firmware itself does **not** use MQTT discovery. (An earlier
+version did auto-discover a handful of core sensors, but keeping two
+overlapping sources of truth caused duplicate/inconsistent entities once the
+YAML package below was added, so firmware-side discovery was removed
+entirely in favor of a single, complete, well-organized source.)
 
 ### Full MQTT sensor coverage (YAML package)
 
-A ready-to-use Home Assistant **package** file covering every topic this
-project publishes — including the entire Victron MPPT (state, error, battery
-V/A, PV power, yield today) and all the extra battery fields above — is
-provided at
-[`homeassistant/mqtt_sensors.yaml`](homeassistant/mqtt_sensors.yaml).
+A ready-to-use Home Assistant **package** file covering every single topic
+this project publishes is provided at
+[`homeassistant/mqtt_sensors.yaml`](homeassistant/mqtt_sensors.yaml),
+including:
+
+- Per battery: voltage, current, power, SOC, cell/MOSFET temp, remaining Ah,
+  full capacity, SOH, discharge cycles, cell min/max/delta voltage, all 16
+  individual cell voltages, human-readable protection/balancing/state/heat
+  text, direction, and a friendly "3h 43m to Reserve" time-remaining sensor
+- The entire Victron MPPT (charger state, error, battery V/A, PV power,
+  yield today) — the firmware has no native discovery for this at all
+- True system-wide combined values (average SOC, total power/current/
+  remaining Ah/capacity, flow direction, time remaining) — **not** a
+  per-battery duplicate; each battery's own values live on its own device
 
 **Install:**
 1. Enable packages in `configuration.yaml` (skip if already enabled):
@@ -442,13 +442,12 @@ provided at
 3. If you changed `MQTT_TOPIC_BASE` / `MQTT_VICTRON_TOPIC_BASE` from the
    defaults (`litime` / `victron`) in `config.h`, update the topic strings
    in the copied file to match.
-4. **Developer Tools → YAML → Check Configuration**, then **Restart** (or
-   Reload All YAML Configuration if no restart-only changes are pending).
+4. **Developer Tools → YAML → Check Configuration**, then **Restart**.
 
-This adds three devices — **LiTime Battery 1**, **LiTime Battery 2**, and
-**Victron MPPT** — plus a virtual **LiTime System** device for the combined
-pack metrics, with entities for every field published over MQTT, including
-all 16 individual cell voltages per battery.
+This creates four devices — **LiTime Battery 1**, **LiTime Battery 2**,
+**LiTime System** (combined/system-wide values), and **Victron MPPT** — with
+an entity for every field published over MQTT. No firmware reflash is
+required to use it; it reads the raw MQTT topics directly.
 
 ---
 
