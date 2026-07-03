@@ -89,6 +89,14 @@ into AC wall power disables the F3800's 240VAC output**, while its solar
 recharge the unit at the same ~1800W rate while it's still actively
 outputting 240VAC — something a wall charger can't do.
 
+> **Power outage backup path:** this also works without any sun. If solar
+> isn't available (e.g. an extended outage), the two LiTime batteries can
+> instead be topped up by an ordinary 120V AC battery charger — run from a
+> portable generator — connected directly to the batteries. The F3800 keeps
+> drawing from them through its PV ports exactly as before, so you're
+> effectively recharging the whole system from 120V generator power while
+> the F3800 continues to output 240VAC the entire time.
+
 > **This project does not talk to the F3800 in any way.** There is no local
 > API/BLE/serial link available for the F3800 Plus (unlike the Solarbank/Smart
 > Plug/Smart Meter line, which Anker's official Home Assistant integration
