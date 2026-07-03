@@ -87,7 +87,7 @@ raw charge speed isn't the point — the real advantage is that **plugging
 into AC wall power disables the F3800's 240VAC output**, while its solar
 (PV) input does not. Feeding it through the PV ports instead means you can
 recharge the unit at the same ~1800W rate while it's still actively
-outputting 240VAC — something a wall charger can't do.
+outputting 240VAC — something the F3800's built-in AC charger can't do.
 
 > **Power outage backup path:** this also works without any sun. If solar
 > isn't available (e.g. an extended outage), the two LiTime batteries can
