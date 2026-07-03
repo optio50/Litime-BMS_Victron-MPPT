@@ -764,25 +764,49 @@ mqtt:
       device: *battery2_device
 
     # ── Combined / system-wide (virtual "LiTime System" device) ───────────
-    - name: "Combined Battery 1 SOC"
-      unique_id: litime_combined_soc_b1
+    # NOTE: these are true combinations of both batteries (sum/average), not
+    # per-battery duplicates — per-battery values already live on the
+    # "LiTime Battery 1" / "LiTime Battery 2" device pages.
+    - name: "Combined Average SOC"
+      unique_id: litime_combined_soc_avg
       state_topic: "litime/combined/state"
-      value_template: "{{ value_json.soc_b1 }}"
+      value_template: "{{ value_json.soc_avg }}"
       unit_of_measurement: "%"
       device_class: battery
       state_class: measurement
+      suggested_display_precision: 0
       device: &system_device
         identifiers: "litime_system"
         name: "LiTime System"
         manufacturer: "LiTime / Victron (custom monitor)"
 
-    - name: "Combined Battery 2 SOC"
-      unique_id: litime_combined_soc_b2
+    - name: "Combined Power"
+      unique_id: litime_combined_power
       state_topic: "litime/combined/state"
-      value_template: "{{ value_json.soc_b2 }}"
-      unit_of_measurement: "%"
-      device_class: battery
+      value_template: "{{ value_json.total_power }}"
+      unit_of_measurement: "W"
+      device_class: power
       state_class: measurement
+      suggested_display_precision: 1
+      device: *system_device
+
+    - name: "Combined Current"
+      unique_id: litime_combined_current
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.total_current }}"
+      unit_of_measurement: "A"
+      device_class: current
+      state_class: measurement
+      suggested_display_precision: 3
+      device: *system_device
+
+    - name: "Combined Remaining Ah"
+      unique_id: litime_combined_remaining_ah
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.total_remaining_ah }}"
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      suggested_display_precision: 1
       device: *system_device
 
     - name: "Combined Full Capacity"
@@ -830,6 +854,7 @@ mqtt:
            ('Discharging' if value_json.flow == 'discharging' else 'Idle') }}
       icon: mdi:swap-horizontal
       device: *system_device
+
 
 
     # ── Victron MPPT — full coverage (no firmware auto-discovery exists yet) ─
