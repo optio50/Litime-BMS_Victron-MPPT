@@ -535,6 +535,22 @@ def fmt_time(seconds, direction="idle") -> str:
 def c_to_f(c):
     return c * 9.0 / 5.0 + 32.0
 
+def min_cell_num(d: dict) -> str:
+    """1-based index of the cell matching cell_min_v, from the cell_voltages
+    list. Returns '—' if unavailable."""
+    cells = d.get("cell_voltages") or []
+    if not cells:
+        return "—"
+    return str(cells.index(min(cells)) + 1)
+
+def max_cell_num(d: dict) -> str:
+    """1-based index of the cell matching cell_max_v, from the cell_voltages
+    list. Returns '—' if unavailable."""
+    cells = d.get("cell_voltages") or []
+    if not cells:
+        return "—"
+    return str(cells.index(max(cells)) + 1)
+
 def flow_color(flow):
     if "charg" in str(flow).lower(): return C_GREEN
     if "discharg" in str(flow).lower(): return C_ORANGE
@@ -849,8 +865,8 @@ class BatteryPanel(QWidget):
         self.cell_t.setText(f"{c_to_f(ct):.0f} °F")
         self.mosfet_t.setText(f"{c_to_f(mt):.0f} °F")
 
-        self.c_min.setText(f"{d.get('cell_min_v', 0):.3f} V")
-        self.c_max.setText(f"{d.get('cell_max_v', 0):.3f} V")
+        self.c_min.setText(f"{d.get('cell_min_v', 0):.3f} V (#{min_cell_num(d)})")
+        self.c_max.setText(f"{d.get('cell_max_v', 0):.3f} V (#{max_cell_num(d)})")
 
         delta     = d.get("cell_delta_mv", 0.0)
         delta_col = C_GREEN if delta < 20 else (C_YELLOW if delta < 50 else C_RED)
