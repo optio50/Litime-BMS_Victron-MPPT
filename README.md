@@ -30,6 +30,18 @@ dashboard app.
 
 ## Screenshots
 
+### Physical LCD (Waveshare 2.4" ILI9341)
+
+| Overview | Battery 1 | Battery 2 |
+|---|---|---|
+| ![LCD Overview](images/lcd-overview.jpg) | ![LCD Battery 1](images/lcd-battery1.jpg) | ![LCD Battery 2](images/lcd-battery2.jpg) |
+
+| Cell Voltages | MPPT |
+|---|---|
+| ![LCD Cell Voltages](images/lcd-cells.jpg) | ![LCD MPPT](images/lcd-mppt.jpg) |
+
+### Desktop Dashboard
+
 ![Overview tab](images/screenshot-01-overview.png)
 
 ![Battery 1 tab](images/screenshot-02-battery1.png)
