@@ -78,10 +78,16 @@ This whole battery + MPPT monitoring rig exists to support a specific
 real-world setup: the two LiTime 48V batteries (kept topped up by the
 Victron MPPT/solar array) are wired into the **two solar (PV) input ports**
 of an **Anker SOLIX F3800 Plus**, delivering roughly **53V DC at up to 17A —
-about 1800W combined** — to rapid-charge the F3800 far faster than its AC or
-car-charging inputs allow. As far as the F3800 is concerned, this looks like
-a (very well-behaved) solar array, since it's within its accepted PV
+about 1800W combined**. As far as the F3800 is concerned, this looks like a
+(very well-behaved) solar array, since it's within its accepted PV
 voltage/current window.
+
+The F3800 already supports up to 1800W recharge from an AC wall outlet, so
+raw charge speed isn't the point — the real advantage is that **plugging
+into AC wall power disables the F3800's 240VAC output**, while its solar
+(PV) input does not. Feeding it through the PV ports instead means you can
+recharge the unit at the same ~1800W rate while it's still actively
+outputting 240VAC — something a wall charger can't do.
 
 > **This project does not talk to the F3800 in any way.** There is no local
 > API/BLE/serial link available for the F3800 Plus (unlike the Solarbank/Smart
