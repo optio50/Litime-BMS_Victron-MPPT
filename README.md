@@ -298,6 +298,18 @@ void loop() {}
 A PyQt5 dark-theme desktop app that subscribes to the same MQTT topics the
 firmware publishes, showing live values plus 24-hour rolling charts.
 
+> ### 📈 Powered by pglive
+> The smooth, genuinely real-time charts throughout this dashboard (Power,
+> Voltage & Current, Cell voltages, Temperatures, Cell Delta, Ah Remaining,
+> PV Power, Yield, and the Charger State timeline) are all built on
+> **[pglive](https://github.com/domarm-comat/pglive)**, layered on top of
+> **[pyqtgraph](https://github.com/pyqtgraph/pyqtgraph)**. pglive's
+> `DataConnector` model made it trivial to get thread-safe, continuously
+> scrolling 24-hour rolling charts with crosshairs, live tooltips, and zero
+> flicker — updating every 2 seconds without any manual redraw/repaint
+> bookkeeping. Genuinely one of the best live-charting experiences available
+> for PyQt, and this dashboard would look far less polished without it.
+
 ### Install
 ```bash
 python3 -m venv venv
@@ -465,6 +477,12 @@ This project builds directly on the work of:
   based on.
 - **[mirosieber/Litime_BMS_ESP32](https://github.com/mirosieber/Litime_BMS_ESP32)**
   — the `BMSClient` Arduino library used to read the LiTime batteries over BLE.
+- **[pglive](https://github.com/domarm-comat/pglive)** — the real-time charting
+  layer behind every live chart in the desktop dashboard. Its `DataConnector`
+  API made smooth, thread-safe, continuously scrolling live plots almost
+  trivial to implement — genuinely excellent library.
+- **[pyqtgraph](https://github.com/pyqtgraph/pyqtgraph)** — the fast
+  scientific plotting library that pglive itself is built on top of.
 
 ## License
 MIT — based on [mirosieber/Litime_BMS_ESP32](https://github.com/mirosieber/Litime_BMS_ESP32)
