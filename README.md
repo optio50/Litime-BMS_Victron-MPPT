@@ -72,6 +72,46 @@ dashboard app.
 
 ---
 
+## Intended Use: Supplementing an Anker SOLIX F3800 Plus
+
+This whole battery + MPPT monitoring rig exists to support a specific
+real-world setup: the two LiTime 48V batteries (kept topped up by the
+Victron MPPT/solar array) are wired into the **two solar (PV) input ports**
+of an **Anker SOLIX F3800 Plus**, delivering roughly **53V DC at up to 17A —
+about 1800W combined** — to rapid-charge the F3800 far faster than its AC or
+car-charging inputs allow. As far as the F3800 is concerned, this looks like
+a (very well-behaved) solar array, since it's within its accepted PV
+voltage/current window.
+
+> **This project does not talk to the F3800 in any way.** There is no local
+> API/BLE/serial link available for the F3800 Plus (unlike the Solarbank/Smart
+> Plug/Smart Meter line, which Anker's official Home Assistant integration
+> supports via local Modbus TCP). This repo's ESP32 + dashboard only monitor
+> the LiTime batteries and Victron MPPT feeding into it — the F3800's own SOC,
+> input/output power, etc. are only visible in the Anker app.
+
+If you're replicating this setup:
+
+- **No external current limiting is needed.** The F3800's solar (PV) input
+  acts as its own charge controller — it draws current on its own terms (up
+  to ~17A per port) rather than the battery bank "pushing" current into it,
+  so there's no MPPT-style current-limiting curve to replicate on the
+  battery side.
+- **Match polarity and voltage window carefully.** These LiTime packs are
+  16S LiFePO4 (nominal 51.2V, resting/charged in the ~53-58V range), which
+  needs to stay inside whatever PV input voltage range the F3800 documents
+  for its solar ports — going over (or under) that window can cause it to
+  reject the input entirely rather than throttle.
+- Split the ~1800W combined draw across both PV ports rather than one, per
+  Anker's per-port PV input rating.
+- This is a manual/passive DC connection, not a communicating "smart"
+  integration — the LiTime/Victron monitoring this project provides is what
+  lets you keep an eye on the source batteries (SOC, current draw, temps)
+  while they feed the F3800, without needing the F3800 itself to report
+  anything back.
+
+---
+
 ## Repository Layout
 
 ```
@@ -79,7 +119,7 @@ LiTime_BMS_Display.ino     Main Arduino sketch (setup/loop)
 LiTime_BMS_Display.h       Shared BatteryData / VictronData structs
 config.h                   ★ All user configuration lives here (WiFi, MQTT, BLE MACs, Victron key)
 display_manager.cpp/.h     ILI9341 LCD rendering
-mqtt_manager.cpp/.h        MQTT publishing + Home Assistant discovery
+mqtt_manager.cpp/.h        MQTT publishing
 victron_mppt.cpp/.h        Victron BLE passive scan, AES-CTR decrypt, decode
 
 litime_monitor.py          PyQt5 desktop dashboard (reads MQTT, live charts)
