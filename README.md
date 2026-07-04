@@ -52,6 +52,8 @@ dashboard app.
 
 ![Charger State tab](images/screenshot-05-log.png)
 
+![BMS 16 Cells tab](images/screenshot-06-cells.png)
+
 ---
 
 ## Features
