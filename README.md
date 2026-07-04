@@ -60,7 +60,7 @@ dashboard app.
 |---|---|
 | BLE polling | Both LiTime batteries polled every 2 s (alternating) |
 | Victron MPPT | Passive BLE advertising scan — decrypts Victron's encrypted "Extra Manufacturer Data" broadcast, no pairing/connection required |
-| SOC display | Large colour-coded bars, on both the physical LCD (optional) and the desktop app |
+| SOC display | Large color-coded bars, on both the physical LCD (optional) and the desktop app |
 | Live data | Voltage · Current · Power · Cell temps · MOSFET temp · PV power · Yield |
 | Cell voltages | Full grid per battery, min/max/delta highlighted |
 | Estimated time | Time-to-full (charging) / time-to-10%-reserve (discharging) — see note below |
