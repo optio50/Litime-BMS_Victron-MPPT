@@ -22,10 +22,14 @@ static String _decodeProt(const String& hex) {
     for (const auto& p : PROT_BITS) if (v & (1UL << p.bit)) { if (o.length()) o += " "; o += p.abbr; }
     return o.length() ? o : "None";
 }
-static String _decodeBalance(const String& bin16) {
+static String _decodeBalance(const String& bin32) {
+    // bin32 is a big-endian binary string of the 32-bit balancing register
+    // (char 0 = bit31 ... last char = bit0 = cell 1), so cell number for a
+    // given index is (length - index), not (index + 1).
     String o;
-    for (int i = 0; i < (int)min((size_t)16, bin16.length()); i++)
-        if (bin16[i] == '1') { if (o.length()) o += ' '; o += 'B'; o += String(i+1); }
+    int len = bin32.length();
+    for (int i = 0; i < len; i++)
+        if (bin32[i] == '1') { if (o.length()) o += ' '; o += 'B'; o += String(len - i); }
     return o.length() ? o : "None";
 }
 static String _decodeBattState(const String& hex) {

@@ -165,6 +165,7 @@ combined: dict = {
     "total_current": 0.0, "total_power": 0.0,
     "total_remaining_ah": 0.0, "total_capacity_ah": 0.0,
     "time_remaining_s": 0, "time_direction": "idle", "flow": "idle",
+    "uptime_s": 0,
 }
 victron_data: dict = {
     "valid": False, "state": 0, "state_str": "Off",
@@ -318,11 +319,20 @@ def decode_battery_state(hex_str: str) -> str:
     return " / ".join(flags) if flags else "Idle"
 
 def decode_balance(bin_str: str) -> str:
-    """Return 'B1 B4 B8 …' for cells being balanced, or 'None'."""
+    """Return 'B1 B4 B8 …' for cells being balanced, or 'None'.
+
+    The BMS reports the balancing register as a 32-bit value packed into a
+    big-endian binary string (BMSClient::bytesToBinaryString emits the MSB
+    of the highest byte first). That means character index 0 is bit 31 and
+    the *last* character is bit 0 = cell 1, so the cell number for a given
+    string index is `len(string) - index`, NOT `index + 1`.
+    """
     if not bin_str:
         return "None"
-    cells = [str(i + 1) for i, c in enumerate(str(bin_str)) if c == "1"]
-    return " ".join(f"B{c}" for c in cells) if cells else "None"
+    s = str(bin_str)
+    n = len(s)
+    cells = [n - i for i, c in enumerate(s) if c == "1"]
+    return " ".join(f"B{c}" for c in sorted(cells)) if cells else "None"
 
 
 # =============================================================================
@@ -342,7 +352,7 @@ SOLAR_STATE_DICT = {
     5:   "Float",
     6:   "Storage",
     7:   "Equalize",
-    11:  "Other Hub-1",
+    11:  "Power Supply",  # official VE.Direct OperationMode enum: state 11 = Power Supply
     245: "Wake-Up",
     252: "EXT Control",
 }
@@ -534,6 +544,27 @@ def fmt_time(seconds, direction="idle") -> str:
 
 def c_to_f(c):
     return c * 9.0 / 5.0 + 32.0
+
+def fmt_uptime(seconds) -> str:
+    """Format ESP32 uptime (seconds since last boot/reset) as e.g.
+    '3d 04h 12m' or '5h 03m' or '42s', matching the same value shown in the
+    TFT footer."""
+    try:
+        seconds = int(seconds)
+    except (ValueError, TypeError):
+        return "—"
+    if seconds <= 0:
+        return "—"
+    d, rem  = divmod(seconds, 86400)
+    h, rem  = divmod(rem, 3600)
+    m, s    = divmod(rem, 60)
+    if d:
+        return f"{d}d {h:02d}h {m:02d}m"
+    if h:
+        return f"{h}h {m:02d}m"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
 
 def min_cell_num(d: dict) -> str:
     """1-based index of the cell matching cell_min_v, from the cell_voltages
@@ -819,6 +850,39 @@ class BatteryPanel(QWidget):
         ahl.addWidget(self.ah_chart)
         chart_tabs.addTab(ahw, "Ah Remaining")
 
+        # ── Tab 7: Per-Cell Voltages (24 hrs) ──────────────────────────────
+        # One chart, one trace per physical cell (16 for this pack), so
+        # individual cell drift/balancing behavior can be tracked over time.
+        self.cellv_chart = make_chart(f"{name} – Cell Voltages (24 hrs)", y_label="V")
+        self.cellv_connectors = []
+        n_cells = 16
+        for i in range(n_cells):
+            color = pg.intColor(i, hues=n_cells, values=1, maxValue=255)
+            cv_plot = LiveLinePlot(pen=pg.mkPen(color, width=1), name=f"C{i+1:02d}")
+            self.cellv_chart.addItem(cv_plot)
+            self.cellv_connectors.append(make_connector(cv_plot))
+
+        # Reserve a blank column on the right (via an invisible right axis)
+        # and anchor the auto-created legend into it, so 16 entries don't
+        # overlap the plotted traces. Note: the legend is normally parented
+        # to the ViewBox, which clips its children to the plot rect — so it
+        # must be reparented to the PlotItem itself (unclipped) before it
+        # can be anchored out into the reserved right-hand column.
+        right_axis = self.cellv_chart.getAxis("right")
+        self.cellv_chart.showAxis("right")
+        right_axis.setStyle(showValues=False, tickLength=0)
+        right_axis.setPen(None)
+        right_axis.setWidth(120)
+        legend = self.cellv_chart.plotItem.legend
+        if legend is not None:
+            legend.setParentItem(self.cellv_chart.plotItem)
+            legend.setColumnCount(1)
+            legend.anchor(itemPos=(1, 0), parentPos=(1, 0), offset=(-5, 30))
+
+        cvw = QWidget(); cvl = QVBoxLayout(cvw); cvl.setContentsMargins(0, 0, 0, 0)
+        cvl.addWidget(self.cellv_chart)
+        chart_tabs.addTab(cvw, "Cell Voltages")
+
         mid.addWidget(chart_tabs, 1)
         root.addLayout(mid, 1)
 
@@ -897,6 +961,12 @@ class BatteryPanel(QWidget):
         self.mt_connector.cb_append_data_point(c_to_f(mt),    ts)
         self.d_connector.cb_append_data_point(delta,          ts)
         self.ah_connector.cb_append_data_point(d.get("remaining_ah", 0.0), ts)
+
+        # Per-cell voltage history (24 hrs) — one trace per physical cell
+        cvs = d.get("cell_voltages", [])
+        for i, conn in enumerate(self.cellv_connectors):
+            if i < len(cvs):
+                conn.cb_append_data_point(cvs[i], ts)
 
         # Cell scatter chart
         self.cell_chart.update_cells(d.get("cell_voltages", []))
@@ -1062,6 +1132,7 @@ class OverviewTab(QWidget):
         self.tot_rem  = cv("Remaining Ah",  3)
         self.tot_time = cv("Time Rem",      4)
         self.flow_lbl = cv("Flow",          5)
+        self.esp_uptime = cv("ESP32 Uptime", 6)
         mid.addWidget(comb_grp, 1)
 
         # Per-battery mini stats
@@ -1195,6 +1266,7 @@ class OverviewTab(QWidget):
         self.flow_lbl.setText(flow.upper())
         self.flow_lbl.setStyleSheet(
             f"color:{flow_color(flow)}; font-size:13px; font-weight:bold;")
+        self.esp_uptime.setText(fmt_uptime(comb.get("uptime_s", 0)))
 
         # Per-battery quick view
         for lbl_v, lbl_i, lbl_p, lbl_t, lbl_prot, lbl_bal, d in [
@@ -1247,7 +1319,7 @@ MPPT_STATE_COLORS = {
     "Float":       "green",
     "Storage":     "orangered",
     "Equalize":    "magenta",
-    "Other Hub-1": "pink",
+    "Power Supply": "pink",
     "Wake-Up":     "cyan",
     "EXT Control": "purple",
 }

@@ -63,28 +63,37 @@ const char* victronStateStr(uint8_t s) {
 }
 
 const char* victronErrorStr(uint8_t e) {
+    // Abbreviated labels for the 240x320 TFT (space-constrained) — kept in
+    // sync with the authoritative Victron error-code table used for the
+    // full descriptions in litime_monitor.py's SOLAR_ERROR_DICT. Both
+    // decode the exact same raw `charger_error` byte broadcast by the MPPT
+    // over BLE, so the two tables must agree on what each code means.
     switch (e) {
         case 0:  return "None";
         case 1:  return "Batt HiTemp";
         case 2:  return "Batt OV";
-        case 3:  return "Batt UV";
-        case 4:  return "Batt OC";
-        case 5:  return "Batt RevPol";
-        case 6:  return "Term HiTemp";
-        case 7:  return "MPPT HiTemp";
-        case 11: return "Batt LoTemp";
-        case 14: return "Low Batt";
-        case 17: return "Overcharged";
+        case 3:  return "TSensor+";     // Battery temp sensor miswired (+)
+        case 4:  return "TSensor-";     // Battery temp sensor miswired (-)
+        case 5:  return "RTempFail";    // Remote temp sensor failure
+        case 6:  return "VSense+";      // Battery voltage sense miswired (+)
+        case 7:  return "VSense-";      // Battery voltage sense miswired (-)
+        case 8:  return "VSenseDiscon"; // Battery voltage sense disconnected
+        case 11: return "HiRipple";     // Battery high ripple voltage
+        case 14: return "Batt LoTemp";  // Battery low temperature
+        case 17: return "MPPT HiTemp";  // Overheated, reduced output current
+        case 18: return "Overcurrent";  // Controller over-current
         case 20: return "Bulk > 10 hr";
         case 21: return "Curr sensor";
-        case 26: return "Term err";
+        case 26: return "Term HiTemp";  // Terminal overheated
+        case 27: return "Short Ckt";    // Charger short circuit
         case 28: return "Power stage";
-        case 33: return "Input OC";
-        case 34: return "Input OV";
+        case 29: return "OverCharge";   // Over-charge protection
+        case 33: return "Input OV";     // PV input over-voltage
+        case 34: return "Input OC";     // PV input over-current
         case 38: return "Input Shdn";
         case 39: return "Input Shdn";
         case 65: return "Comm warn";
-        case 66: return "Conn mode";
+        case 66: return "Incompat Dev"; // Incompatible device (paralleling/network config conflict)
         case 67: return "BMS error";
         case 68: return "Net miscfg";
         default: return "Err";

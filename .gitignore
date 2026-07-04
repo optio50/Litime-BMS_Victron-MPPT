@@ -1,0 +1,20 @@
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Local Python virtual environment
+litime/
+venv/
+.venv/
+
+# Scratch / backup files (old copies, not part of the project)
+other/
+
+# Ad-hoc desktop screenshots dropped in the repo root (not the documented
+# images/ folder used by the README)
+/*.png
+
+# Editor/OS cruft
+.vscode/
+*.swp
+.DS_Store

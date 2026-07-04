@@ -210,6 +210,9 @@ void MQTTManager::_publishCombined(const BatteryData& b1, const BatteryData& b2)
     const char* flow = (totalP > 1.0f) ? "charging" :
                        (totalP < -1.0f) ? "discharging" : "idle";
     doc["flow"] = flow;
+    // ESP32 uptime (seconds since last boot/reset) — same value shown in the
+    // TFT footer (see DisplayManager::_footer / millis()/1000 callers).
+    doc["uptime_s"] = (uint32_t)(millis() / 1000UL);
 
     char payload[512];
     serializeJson(doc, payload, sizeof(payload));

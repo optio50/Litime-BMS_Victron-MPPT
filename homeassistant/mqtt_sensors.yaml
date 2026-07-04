@@ -266,10 +266,11 @@ mqtt:
       state_topic: "litime/battery1/state"
       value_template: >-
         {%- set s = value_json.balancing | string -%}
+        {%- set n = s | length -%}
         {%- set ns = namespace(active=[]) -%}
-        {%- for i in range(s | length) -%}
+        {%- for i in range(n) -%}
           {%- if s[i] == '1' -%}
-            {%- set ns.active = ns.active + ['Cell ' ~ (i + 1)] -%}
+            {%- set ns.active = ns.active + ['Cell ' ~ (n - i)] -%}
           {%- endif -%}
         {%- endfor -%}
         {{ ns.active | join(', ') if ns.active else 'None' }}
@@ -600,10 +601,11 @@ mqtt:
       state_topic: "litime/battery2/state"
       value_template: >-
         {%- set s = value_json.balancing | string -%}
+        {%- set n = s | length -%}
         {%- set ns = namespace(active=[]) -%}
-        {%- for i in range(s | length) -%}
+        {%- for i in range(n) -%}
           {%- if s[i] == '1' -%}
-            {%- set ns.active = ns.active + ['Cell ' ~ (i + 1)] -%}
+            {%- set ns.active = ns.active + ['Cell ' ~ (n - i)] -%}
           {%- endif -%}
         {%- endfor -%}
         {{ ns.active | join(', ') if ns.active else 'None' }}
