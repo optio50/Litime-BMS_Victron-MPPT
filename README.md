@@ -50,7 +50,7 @@ dashboard app.
 
 ![MPPT tab](images/screenshot-04-mppt.png)
 
-![Log tab](images/screenshot-05-log.png)
+![Charger State tab](images/screenshot-05-log.png)
 
 ---
 
