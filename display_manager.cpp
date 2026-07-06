@@ -276,9 +276,15 @@ void DisplayManager::_pageOverview(const BatteryData& b1, const BatteryData& b2)
     _tft->drawFastHLine(0, 54, 320, COL_HEADER);
 
     // ----- Combined totals ------------------------------------------------
+    // Only average SOC from connected batteries to avoid skewing the reading
+    // when one BMS is disconnected (would otherwise report 0%)
+    int   connectedCount = 0;
+    float avgSOC       = 0.0f;
+    if (b1.connected) { avgSOC += b1.soc; connectedCount++; }
+    if (b2.connected) { avgSOC += b2.soc; connectedCount++; }
+    if (connectedCount > 0) { avgSOC /= connectedCount; }
     float totalCurrent  = b1.current + b2.current;
     float totalPower    = (b1.totalVoltage * b1.current) + (b2.totalVoltage * b2.current);
-    float avgSOC        = (b1.soc + b2.soc) / 2.0f;
     float totalRemainAh = b1.remainingAh + b2.remainingAh;
     float totalCapAh    = b1.fullCapacityAh + b2.fullCapacityAh;
     float absI          = fabs(totalCurrent);

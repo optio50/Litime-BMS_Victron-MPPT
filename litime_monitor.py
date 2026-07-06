@@ -91,19 +91,22 @@ CHART_ROLL_SPLIT = 400
 # =============================================================================
 #  ─── COLORS ─────────────────────────────────────────────────────────────────
 # =============================================================================
-C_BG        = "#1e1e1e"
-C_PANEL     = "#2a2a2a"
-C_BORDER    = "#3a3a3a"
-C_TEXT      = "#e0e0e0"
-C_DIM       = "#888888"
-C_GREEN     = "#038513"
-C_YELLOW    = "yellow"
-C_ORANGE    = "#ffa726"
-C_ORANGERED = "orangered"
-C_RED       = "red"
-C_BLUE      = "#42a5f5"
-C_CYAN      = "#26c6da"
-C_MAGENTA   = "#ab47bc"
+C_BG         = "#1e1e1e"
+C_PANEL      = "#2a2a2a"
+C_BORDER     = "#3a3a3a"
+C_TEXT       = "#e0e0e0"
+C_DIM        = "#888888"
+C_GREEN      = "#038513"
+C_YELLOW     = "yellow"
+C_ORANGE     = "#ffa726"
+C_ORANGERED  = "orangered"
+C_RED        = "red"
+C_BLUE       = "#42a5f5"
+C_MEDBLUE    = "#206bee"
+C_CYAN       = "#26c6da"
+C_MAGENTA    = "#ab47bc"
+C_BLACK      = "#000000"
+C_DARKORANGE = "#584115"
 
 DARK_STYLESHEET = f"""
     QMainWindow, QWidget {{ background-color: {C_BG}; color: {C_TEXT}; }}
@@ -117,7 +120,7 @@ DARK_STYLESHEET = f"""
     QGroupBox {{
         border: 1px solid {C_BORDER}; border-radius: 6px;
         margin-top: 14px; padding: 8px;
-        font-weight: bold; color: {C_CYAN};
+        font-weight: bold; color: {C_DARKORANGE}; font-size: 12px;
     }}
     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}
     QProgressBar {{
@@ -453,7 +456,8 @@ def decode_mppt_error_short(code) -> str:
 # =============================================================================
 #  ─── HELPER WIDGETS / FUNCTIONS ──────────────────────────────────────────────
 # =============================================================================
-def make_label(text, color=C_TEXT, bold=False, size=11, align=Qt.AlignLeft):
+def make_label(text, color=C_TEXT, bold=False, size=11, align=Qt.AlignLeft | Qt.AlignVCenter):
+
     lbl = QLabel(text)
     lbl.setAlignment(align)
     weight = "bold" if bold else "normal"
@@ -635,6 +639,12 @@ def make_category_chart(title: str, categories: list, roll: int = CHART_ROLL) ->
     return w
 
 
+def _auto_fill_brush(color):
+    """Create an auto brush from a color for filled charts."""
+    c = QColor(color)
+    return (c.red(), c.green(), c.blue(), 200)
+
+
 # =============================================================================
 #  ─── CELL VOLTAGE CHART ──────────────────────────────────────────────────────
 # =============================================================================
@@ -732,7 +742,7 @@ class BatteryPanel(QWidget):
 
         vi_grp = QGroupBox("Voltage / Current")
         vi_lay = QGridLayout(vi_grp)
-        self.v_big    = make_label("—", C_CYAN,   bold=True, size=26, align=Qt.AlignCenter)
+        self.v_big    = make_label("—", C_MEDBLUE,   bold=True, size=26, align=Qt.AlignCenter)
         self.i_big    = make_label("—", C_GREEN,  bold=True, size=26, align=Qt.AlignCenter)
         self.p_big    = make_label("—", C_YELLOW, bold=True, size=18, align=Qt.AlignCenter)
         self.flow_lbl = make_label("IDLE", C_DIM, bold=True, size=12, align=Qt.AlignCenter)
@@ -985,6 +995,22 @@ class OverviewTab(QWidget):
         root.setSpacing(6)
 
         # ── status strip ─────────────────────────────────────────────────────
+        # Each item is wrapped in a small vertical-stretch container so it is
+        # guaranteed to sit at the vertical center of the row regardless of
+        # how tall the row ends up (driven by the MQTT box / app icon), since
+        # relying solely on QBoxLayout's per-item `alignment` flag does not
+        # reliably vertically center widgets whose own sizeHint is small
+        # relative to the row.
+        def vcenter(widget):
+            container = QWidget()
+            vlay = QVBoxLayout(container)
+            vlay.setContentsMargins(0, 0, 0, 0)
+            vlay.setSpacing(0)
+            vlay.addStretch(1)
+            vlay.addWidget(widget)
+            vlay.addStretch(1)
+            return container
+
         status_row = QHBoxLayout()
 
         self.mqtt_indicator = MqttLedWidget()
@@ -992,13 +1018,13 @@ class OverviewTab(QWidget):
         self.b2_led   = make_label(f"⬤  {BAT2_NAME}", C_RED,  bold=True, size=11)
         self.mppt_led = make_label("⬤  MPPT",          C_RED,  bold=True, size=11)
         self.ts_lbl   = make_label("—",                 C_DIM,             size=10)
-        status_row.addWidget(self.mqtt_indicator)
+        status_row.addWidget(vcenter(self.mqtt_indicator))
         status_row.addSpacing(12)
-        status_row.addWidget(self.b1_led)
+        status_row.addWidget(vcenter(self.b1_led))
         status_row.addSpacing(12)
-        status_row.addWidget(self.b2_led)
+        status_row.addWidget(vcenter(self.b2_led))
         status_row.addSpacing(12)
-        status_row.addWidget(self.mppt_led)
+        status_row.addWidget(vcenter(self.mppt_led))
 
         # App icon/logo, shown at native aspect ratio scaled to strip height
         status_row.addSpacing(12)
@@ -1008,12 +1034,13 @@ class OverviewTab(QWidget):
         if not _pix.isNull():
             self.logo_lbl.setPixmap(
                 _pix.scaledToHeight(48, Qt.SmoothTransformation))
-        status_row.addWidget(self.logo_lbl)
+        status_row.addWidget(vcenter(self.logo_lbl))
 
         status_row.addStretch()
-        status_row.addWidget(self.ts_lbl)
+        status_row.addWidget(vcenter(self.ts_lbl))
 
         root.addLayout(status_row)
+
 
         # ── SOC row: Combined | Battery 1 | Battery 2  (single horizontal row) ──
         soc_row = QHBoxLayout()
@@ -1027,7 +1054,7 @@ class OverviewTab(QWidget):
             bar.setRange(0, 100)
             bar.setFixedHeight(20)
             bar.setMinimumWidth(100)
-            v_lbl = make_label("0.00 V", C_CYAN, bold=True, size=11, align=Qt.AlignCenter)
+            v_lbl = make_label("0.00 V", C_MEDBLUE, bold=True, size=15, align=Qt.AlignCenter)
             lay.addWidget(bar)
             lay.addWidget(v_lbl)
             return grp, bar, v_lbl
@@ -1133,6 +1160,8 @@ class OverviewTab(QWidget):
         self.tot_time = cv("Time Rem",      4)
         self.flow_lbl = cv("Flow",          5)
         self.esp_uptime = cv("ESP32 Uptime", 6)
+        self._last_uptime = -1
+        self._uptime_change_time = time.time()
         mid.addWidget(comb_grp, 1)
 
         # Per-battery mini stats
@@ -1201,10 +1230,19 @@ class OverviewTab(QWidget):
         self.b2_led.setStyleSheet(  f"color:{b2_col};   font-weight:bold;")
         self.mppt_led.setStyleSheet(f"color:{mppt_col}; font-weight:bold;")
 
-        # SOC row
+        # SOC row – only average connected batteries' SOC to avoid skewing the reading
+        # when one BMS is disconnected (would otherwise report 0%)
+        b1_conn = b1d.get("connected", False)
+        b2_conn = b2d.get("connected", False)
         s1      = b1d.get("soc", 0)
         s2      = b2d.get("soc", 0)
-        avg_soc = comb.get("soc_avg", (s1 + s2) / 2.0)
+        # Calculate avg only from connected batteries
+        connected_count = sum([b1_conn, b2_conn])
+        if connected_count > 0:
+            calc_avg = (s1 + s2) / connected_count
+        else:
+            calc_avg = 0.0
+        avg_soc = comb.get("soc_avg", calc_avg)
         v1      = b1d.get("total_voltage", 0.0)
         v2      = b2d.get("total_voltage", 0.0)
         v_avg   = (v1 + v2) / 2.0
@@ -1266,7 +1304,46 @@ class OverviewTab(QWidget):
         self.flow_lbl.setText(flow.upper())
         self.flow_lbl.setStyleSheet(
             f"color:{flow_color(flow)}; font-size:13px; font-weight:bold;")
-        self.esp_uptime.setText(fmt_uptime(comb.get("uptime_s", 0)))
+        # ESP32 uptime with stale detection
+        uptime_val = comb.get("uptime_s", 0)
+        now_stale = ts - self._uptime_change_time >= 10
+        was_stale = getattr(self, "_uptime_was_stale", False)
+        if uptime_val > self._last_uptime:
+            self._last_uptime = uptime_val
+            self._uptime_change_time = ts
+            uptime_col = C_GREEN
+            if was_stale:
+                self._uptime_was_stale = False
+                parent = self.parentWidget()
+                while parent and not hasattr(parent, "_log"):
+                    parent = parent.parentWidget()
+                if parent:
+                    parent._log(f"ESP32: uptime update resumed (now {fmt_uptime(uptime_val)})", C_GREEN)
+        elif uptime_val < self._last_uptime:
+            # ESP32 rebooted (uptime reset) - treat as fresh data
+            self._last_uptime = uptime_val
+            self._uptime_change_time = ts
+            uptime_col = C_GREEN
+            if was_stale:
+                self._uptime_was_stale = False
+                parent = self.parentWidget()
+                while parent and not hasattr(parent, "_log"):
+                    parent = parent.parentWidget()
+                if parent:
+                    parent._log(f"ESP32: uptime update resumed after reboot (now {fmt_uptime(uptime_val)})", C_GREEN)
+        elif now_stale:
+            uptime_col = C_RED
+            if not was_stale:
+                self._uptime_was_stale = True
+                parent = self.parentWidget()
+                while parent and not hasattr(parent, "_log"):
+                    parent = parent.parentWidget()
+                if parent:
+                    parent._log(f"ESP32: No uptime update received - data may be stale (was {fmt_uptime(self._last_uptime)})", C_RED)
+        else:
+            uptime_col = C_GREEN
+        self.esp_uptime.setText(fmt_uptime(uptime_val))
+        self.esp_uptime.setStyleSheet(f"color:{uptime_col}; font-size:13px; font-weight:bold;")
 
         # Per-battery quick view
         for lbl_v, lbl_i, lbl_p, lbl_t, lbl_prot, lbl_bal, d in [
