@@ -18,3 +18,4 @@ other/
 .vscode/
 *.swp
 .DS_Store
+venv/
