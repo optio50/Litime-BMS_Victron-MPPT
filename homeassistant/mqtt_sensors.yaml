@@ -292,12 +292,12 @@ mqtt:
       icon: mdi:battery-heart-variant
       device: *battery1_device
 
-    - name: "Battery 1 Heat State"
-      unique_id: litime_battery1_heat_state
+    - name: "Battery 1 Status Register (0x68)"
+      unique_id: litime_battery1_status_reg_68
       state_topic: "litime/battery1/state"
-      value_template: >-
-        {{ 'Heating Active' if (value_json.heat_state | int(0, 16)) != 0 else 'Idle' }}
-      icon: mdi:radiator
+      value_template: "{{ value_json.status_reg_68 }}"
+      icon: mdi:memory
+      entity_category: diagnostic
       device: *battery1_device
 
     # Individual cell voltages (16S pack) — published on plain (non-JSON) topics
@@ -627,12 +627,12 @@ mqtt:
       icon: mdi:battery-heart-variant
       device: *battery2_device
 
-    - name: "Battery 2 Heat State"
-      unique_id: litime_battery2_heat_state
+    - name: "Battery 2 Status Register (0x68)"
+      unique_id: litime_battery2_status_reg_68
       state_topic: "litime/battery2/state"
-      value_template: >-
-        {{ 'Heating Active' if (value_json.heat_state | int(0, 16)) != 0 else 'Idle' }}
-      icon: mdi:radiator
+      value_template: "{{ value_json.status_reg_68 }}"
+      icon: mdi:memory
+      entity_category: diagnostic
       device: *battery2_device
 
     # Individual cell voltages (16S pack)

@@ -87,7 +87,7 @@ void MQTTManager::_publishBattery(const BatteryData& b, const char* prefix, uint
     doc["protection"]      = b.protectionState.c_str();
     doc["balancing"]       = b.balancingState.c_str();
     doc["battery_state"]   = b.batteryState.c_str();
-    doc["heat_state"]      = b.heatState.c_str();
+    doc["status_reg_68"]   = b.statusReg68.c_str();
 
     // Estimated time remaining (seconds) with correct charging/discharging direction
     // Charging    → time to FULL    = (fullAh - remainAh) / I

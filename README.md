@@ -498,8 +498,9 @@ including:
 
 - Per battery: voltage, current, power, SOC, cell/MOSFET temp, remaining Ah,
   full capacity, SOH, discharge cycles, cell min/max/delta voltage, all 16
-  individual cell voltages, human-readable protection/balancing/state/heat
-  text, direction, and a friendly "3h 43m to Reserve" time-remaining sensor
+  individual cell voltages, human-readable protection/balancing/state text,
+  a raw status-register diagnostic, direction, and a friendly "3h 43m to
+  Reserve" time-remaining sensor
 - The entire Victron MPPT (charger state, error, battery V/A, PV power,
   yield today) — the firmware has no native discovery for this at all
 - True system-wide combined values (average SOC, total power/current/
@@ -555,6 +556,7 @@ Key byte offsets in the 104-byte response:
 | SOC | [90..91] | % |
 | SOH | [92..95] | % |
 | Discharge cycles | [96..99] | count |
+| Status register (0x68) | [68..71] | raw hex (unidentified — library labeled "heat" but pack has no heater) |
 
 ---
 

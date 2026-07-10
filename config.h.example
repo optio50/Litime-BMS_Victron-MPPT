@@ -24,7 +24,7 @@
 // Point this at any weather page to get a quick solar/rain forecast.
 // International users: change "en-us" to your locale (en-gb, de-de, etc.)
 // and the city/state to your location (e.g. /in-London, /in-Berlin).
-#define WEATHER_URL  "https://www.msn.com/en-us/weather/forecast/in-YourCity,ST"
+#define WEATHER_URL  "https://www.msn.com/en-us/weather/forecast/in-Phoenix,AZ"
 
 // --- BLE MAC Addresses of each LiTime 48V 100Ah battery --------------------
 // Run a BLE scan (see README) to find the MAC addresses of your batteries.

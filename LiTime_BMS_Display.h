@@ -21,7 +21,11 @@ struct BatteryData {
     float    remainingAh     = 0.0f;
     float    fullCapacityAh  = 0.0f;
     String   protectionState = "0x00000000";
-    String   heatState       = "0x00000000";
+    // Raw 4-byte register at BLE notification offset 68. The BMSClient library
+    // named this "heatState", but LiTime 48V 100Ah packs have no heater — the
+    // value is a non-zero status/counter register, not a heater on/off flag.
+    // Kept as a raw diagnostic hex string under a neutral name.
+    String   statusReg68     = "0x00000000";
     String   balanceMemory   = "0x00000000";
     String   failureState    = "0x000000";
     String   balancingState  = "0000000000000000";

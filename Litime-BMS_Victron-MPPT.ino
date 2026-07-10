@@ -79,7 +79,7 @@ static void copyBmsData(BMSClient& src, BatteryData& dst) {
     dst.remainingAh      = src.getRemainingAh();
     dst.fullCapacityAh   = src.getFullCapacityAh();
     dst.protectionState  = src.getProtectionState();
-    dst.heatState        = src.getHeatState();
+    dst.statusReg68      = src.getHeatState();  // library mislabels offset 68 as "heat"
     dst.balanceMemory    = src.getBalanceMemory();
     dst.failureState     = src.getFailureState();
     dst.balancingState   = src.getBalancingState();
