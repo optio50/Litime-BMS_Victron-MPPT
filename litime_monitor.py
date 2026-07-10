@@ -31,8 +31,9 @@ from PyQt5.QtWidgets import (
     QTextBrowser, QSplitter, QFrame, QSizePolicy
 )
 from PyQt5 import QtGui
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QObject, QIODevice, QByteArray
 from PyQt5.QtGui import QFont, QColor, QPalette, QPixmap
+from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
 
 import pyqtgraph as pg
 from pglive.kwargs import Axis, Crosshair
@@ -47,7 +48,15 @@ import paho.mqtt.client as mqtt
 
 import shared_config
 
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-logging"
+# Each process gets its own isolated QtWebEngine profile directory so two
+# instances running at once don't fight over Chromium's SQLite cookie
+# database (the "database is locked" errors). --log-level=3 caps Chromium
+# logging at FATAL, silencing noisy database.cc / service_worker_storage
+# ERROR messages that --disable-logging alone doesn't suppress.
+_qt_profile_dir = os.path.join("/tmp", f"litime_qt_{os.getpid()}")
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+    f"--disable-logging --log-level=3 --user-data-dir={_qt_profile_dir}"
+)
 os.putenv("QT_LOGGING_RULES", "*.debug=false;qt.qpa.*=false")
 
 # =============================================================================
@@ -69,7 +78,7 @@ RAND_ID      = random.randint(1, 1000)
 
 BAT1_NAME    = _cfg["BMS1_NAME"]
 BAT2_NAME    = _cfg["BMS2_NAME"]
-
+WEATHER_URL  = _cfg.get("WEATHER_URL", "")
 BAT_NAME     = {1: BAT1_NAME, 2: BAT2_NAME}
 
 # All charts are fed once per UI refresh tick (self.timer, 2 s interval —
@@ -1401,6 +1410,12 @@ MPPT_STATE_COLORS = {
     "EXT Control": "purple",
 }
 
+class _QuietWebPage(QWebEnginePage):
+    """Suppress noisy JS console messages from embedded web pages."""
+    def javaScriptConsoleMessage(self, level, message, line, source):
+        pass  # discard all JS console output
+
+
 class MpptTab(QWidget):
     """Inner tab widget with one 24-hour live chart per MPPT metric,
     matching the per-battery inner chart-tab layout. A statistics panel
@@ -1482,6 +1497,15 @@ class MpptTab(QWidget):
         sl.addWidget(self.state_chart)
         chart_tabs.addTab(sw, "Charger State")
 
+        # ── Weather forecast browser ──────────────────────────────────────
+        if WEATHER_URL:
+            self.weather_view = QWebEngineView()
+            self.weather_view.setPage(_QuietWebPage(self.weather_view))
+            self.weather_view.setUrl(QUrl(WEATHER_URL))
+            ww = QWidget(); wl = QVBoxLayout(ww); wl.setContentsMargins(0, 0, 0, 0)
+            wl.addWidget(self.weather_view)
+            chart_tabs.addTab(ww, "Weather")
+
         mid.addWidget(chart_tabs, 1)
         root.addLayout(mid)
 
@@ -1529,6 +1553,112 @@ class MpptTab(QWidget):
 
         self.state_connector.cb_append_data_point([state_s], ts)
 
+
+
+# =============================================================================
+#  ─── LATCHED ALARM STATE MACHINE ─────────────────────────────────────────────
+# =============================================================================
+class LatchedAlarm:
+    """Hysteresis-based alarm with one-shot logging and recovery cooldown.
+
+    States:  idle → active → recovering → idle
+
+    * idle → active:        value crosses an enter threshold → log the alarm once.
+    * active (same):        value stays above exit threshold → suppress all repeats.
+    * active → escalate:    value crosses a higher enter threshold → log escalation.
+    * active → recovering:  value drops below ALL exit thresholds → log recovery.
+    * recovering → active (within cooldown): same condition returns → suppress.
+    * recovering → idle (after cooldown): silently re-arm for new events.
+
+    The hysteresis gap (enter > exit) prevents threshold-jitter from causing
+    false recoveries, and the cooldown window prevents the same flappy event
+    from re-logging for ALARM_COOLDOWN_S after it first clears.
+    """
+
+    def __init__(self, levels: list, cooldown_s: float = 900):
+        """
+        levels: list of level dicts, highest severity first:
+            [{"name": "ALARM",   "enter": 50, "exit": 45, "color": C_RED},
+             {"name": "WARNING", "enter": 20, "exit": 15, "color": C_ORANGE}]
+        cooldown_s: seconds after recovery before re-arming (idle).
+        """
+        self.levels       = levels
+        self.cooldown     = cooldown_s
+        self.state        = "idle"          # idle | active | recovering
+        self.logged_level = None            # highest severity name logged this period
+        self.logged       = False           # whether we logged anything this period
+        self.active_t     = 0.0
+        self.recover_t    = 0.0
+
+    def _level_index(self, name: str) -> int:
+        for i, lv in enumerate(self.levels):
+            if lv["name"] == name:
+                return i
+        return 999
+
+    def _current_level(self, val: float):
+        """Return the highest-severity level whose enter threshold is met."""
+        for lv in self.levels:
+            if val >= lv["enter"]:
+                return lv
+        return None
+
+    def _recovered(self, val: float) -> bool:
+        """True when val is below ALL exit thresholds."""
+        return all(val < lv["exit"] for lv in self.levels)
+
+    def update(self, val: float, now: float):
+        """Process a new value. Returns a result dict or None (suppress).
+
+        Result dict keys:
+            action:   "enter" | "escalate" | "recover"
+            level:    the level dict (for enter/escalate)
+            duration: seconds since active_t (for recover)
+        """
+        lvl = self._current_level(val)
+
+        # ── idle ───────────────────────────────────────────────────────────
+        if self.state == "idle":
+            if lvl is not None:
+                self.state        = "active"
+                self.logged_level = lvl["name"]
+                self.logged       = True
+                self.active_t     = now
+                return {"action": "enter", "level": lvl}
+            return None
+
+        # ── active ─────────────────────────────────────────────────────────
+        if self.state == "active":
+            if lvl is not None:
+                # Still in an alarm/warning zone – check for escalation
+                if self._level_index(lvl["name"]) < self._level_index(self.logged_level):
+                    self.logged_level = lvl["name"]
+                    self.logged       = True
+                    return {"action": "escalate", "level": lvl}
+                return None    # same or lower level – suppress
+            if self._recovered(val):
+                self.state     = "recovering"
+                self.recover_t = now
+                if self.logged:
+                    return {"action": "recover", "duration": now - self.active_t}
+                return None
+            return None        # hysteresis gap – still active, suppress
+
+        # ── recovering ─────────────────────────────────────────────────────
+        if self.state == "recovering":
+            if lvl is not None:
+                # Condition returned within cooldown – suppress
+                self.state  = "active"
+                self.logged = False
+                return None
+            if now - self.recover_t >= self.cooldown:
+                self.state        = "idle"
+                self.logged_level = None
+                self.logged       = False
+                return None
+            return None
+
+        return None
 
 
 # =============================================================================
@@ -1586,15 +1716,14 @@ class Window(QMainWindow):
     # before it's logged, which collapses trickle-charge duty-cycling into
     # a single entry.
     #
-    # MPPT errors are treated differently: every distinct error change is
-    # logged IMMEDIATELY, no matter how brief, so a genuine one-off fault is
-    # never missed. Only when the SAME error toggles more than
-    # FLAP_MAX_TOGGLES times within FLAP_WINDOW_S seconds (rapid-fire,
-    # spammy duplicates - e.g. a flaky sensor reading) do we collapse it
-    # down to a single "flapping" notice until it settles.
+    # Alarms (cell delta, temperatures, MPPT errors) use a latched state
+    # machine with hysteresis (LatchedAlarm): the alarm is logged ONCE when
+    # it first triggers, then all repeated triggers are suppressed while it
+    # remains active. When the value drops below the exit threshold, a
+    # recovery message is logged. After ALARM_COOLDOWN_S of being recovered,
+    # the alarm re-arms and is ready to fire as a new event.
     FLOW_DEBOUNCE_S  = 45
-    FLAP_WINDOW_S    = 30
-    FLAP_MAX_TOGGLES = 3
+    ALARM_COOLDOWN_S = 900   # 15 minutes – time after recovery before re-arming
 
     def _init_event_tracking(self):
         _none = {"connected": None, "flow": None,
@@ -1603,22 +1732,47 @@ class Window(QMainWindow):
                  "protection": None, "balancing": None,
                  "cell_delta_mv": None, "cell_temp_f": None, "mosfet_temp_f": None}
         self._prev = {1: copy.copy(_none), 2: copy.copy(_none)}
-        self._prev_mppt_error    = None
-        self._flap_history       = {}   # key -> [timestamps of recent transitions]
-        self._flapping           = {}   # key -> bool (currently suppressed)
+
+        # Latched alarm state machines – one per battery per metric.
+        # Hysteresis: enter threshold > exit threshold, so jitter around
+        # the boundary stays in "active" and is silently suppressed.
+        delta_levels = [
+            {"name": "ALARM",   "enter": 50, "exit": 45, "color": C_RED},
+            {"name": "WARNING", "enter": 20, "exit": 15, "color": C_ORANGE},
+        ]
+        temp_levels = [
+            {"name": "ALARM",   "enter": 125, "exit": 120, "color": C_RED},
+            {"name": "WARNING", "enter": 110, "exit": 105, "color": C_ORANGE},
+        ]
+        self._alarms = {}
+        for bid in (1, 2):
+            self._alarms[bid] = {
+                "cell_delta":  LatchedAlarm(delta_levels, self.ALARM_COOLDOWN_S),
+                "cell_temp":    LatchedAlarm(temp_levels,  self.ALARM_COOLDOWN_S),
+                "mosfet_temp":  LatchedAlarm(temp_levels,  self.ALARM_COOLDOWN_S),
+            }
+
+        # MPPT error latched state (error-code based, not threshold)
+        self._mppt_err_state     = "idle"   # idle | active | recovering
+        self._mppt_err_code      = 0
+        self._mppt_err_active_t  = 0.0
+        self._mppt_err_recover_t = 0.0
+        self._mppt_err_logged    = False
         self._last_summary_t     = 0.0
         self._summary_interval_s = 600
 
-    def _flap_check(self, key: str, now: float) -> bool:
-        """Record a transition timestamp for `key` and return True if it has
-        toggled more than FLAP_MAX_TOGGLES times within FLAP_WINDOW_S
-        seconds (i.e. it's flapping rapidly and should be suppressed)."""
-        hist = self._flap_history.setdefault(key, [])
-        hist.append(now)
-        cutoff = now - self.FLAP_WINDOW_S
-        while hist and hist[0] < cutoff:
-            hist.pop(0)
-        return len(hist) > self.FLAP_MAX_TOGGLES
+    def _log_alarm_result(self, name, label, val_str, result):
+        """Format and log a LatchedAlarm.update() result."""
+        action = result["action"]
+        if action in ("enter", "escalate"):
+            level = result["level"]
+            self._log(f"{name}: {label} {level['name']}  {val_str}", level["color"])
+        elif action == "recover":
+            duration = result["duration"]
+            mins = int(duration) // 60
+            secs = int(duration) % 60
+            dur_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+            self._log(f"{name}: {label} recovered after {dur_str}  (now {val_str})", C_GREEN)
 
     def _check_battery_events(self, bid: int, data: dict):
         prev = self._prev[bid]
@@ -1686,63 +1840,79 @@ class Window(QMainWindow):
         delta = data.get("cell_delta_mv", 0.0)
         old_d = prev["cell_delta_mv"]
         if old_d is not None:
-            if old_d < 50 and delta >= 50:
-                self._log(f"{name}: cell delta ALARM  {delta:.1f} mV", C_RED)
-            elif old_d < 20 and delta >= 20:
-                self._log(f"{name}: cell delta WARNING  {delta:.1f} mV", C_ORANGE)
-            elif old_d >= 20 and delta < 20:
-                self._log(f"{name}: cell delta OK  {delta:.1f} mV", C_GREEN)
+            result = self._alarms[bid]["cell_delta"].update(delta, now)
+            if result:
+                self._log_alarm_result(name, "cell delta", f"{delta:.1f} mV", result)
         prev["cell_delta_mv"] = delta
 
         ct_f = c_to_f(data.get("cell_temp",   0))
         mt_f = c_to_f(data.get("mosfet_temp", 0))
-        for label, val, key in [("cell temp",  ct_f, "cell_temp_f"),
-                                  ("MOSFET temp", mt_f, "mosfet_temp_f")]:
+        for label, val, key, alarm_key in [("cell temp",   ct_f, "cell_temp_f",   "cell_temp"),
+                                            ("MOSFET temp", mt_f, "mosfet_temp_f", "mosfet_temp")]:
             old_v = prev[key]
             if old_v is not None:
-                if old_v < 125 and val >= 125:
-                    self._log(f"{name}: {label} ALARM  {val:.0f} °F", C_RED)
-                elif old_v < 110 and val >= 110:
-                    self._log(f"{name}: {label} WARNING  {val:.0f} °F", C_ORANGE)
-                elif old_v >= 110 and val < 110:
-                    self._log(f"{name}: {label} normal  {val:.0f} °F", C_GREEN)
+                result = self._alarms[bid][alarm_key].update(val, now)
+                if result:
+                    self._log_alarm_result(name, label, f"{val:.0f} °F", result)
             prev[key] = val
 
     def _check_mppt_events(self, vict: dict):
-        """Edge-triggered MPPT error logging: log immediately every time the
-        error code changes (active or cleared) so a genuine one-off error is
-        never missed. Only suppressed (via _flap_check) when the same error
-        toggles rapidly many times in a row, which indicates transient
-        sensor/read noise rather than a real, distinct event."""
+        """Latched MPPT error logging: log an error once when it first
+        appears, suppress re-occurrences of the same error within
+        ALARM_COOLDOWN_S of clearing, and log the recovery when the error
+        clears. A different error code is always logged as a new event.
+        After the cooldown, the same error is also treated as new."""
         if not vict.get("valid", False):
             return
         err_code = vict.get("error", 0)
-        if self._prev_mppt_error is None:
-            self._prev_mppt_error = err_code
-            return
-        if err_code == self._prev_mppt_error:
-            return
-
         now = time.time()
-        key = "mppt_error"
-        flapping_now = self._flap_check(key, now)
-        was_flapping = self._flapping.get(key, False)
 
-        if flapping_now:
-            if not was_flapping:
-                self._log("MPPT: error flapping rapidly – "
-                          "suppressing further messages until it stabilizes", C_ORANGE)
-            self._flapping[key] = True
-        else:
-            if was_flapping:
-                self._log("MPPT: error state stabilized", C_GREEN)
-                self._flapping[key] = False
+        if self._mppt_err_state == "idle":
             if err_code:
+                self._mppt_err_state    = "active"
+                self._mppt_err_code     = err_code
+                self._mppt_err_active_t = now
+                self._mppt_err_logged   = True
                 self._log(f"MPPT: ERROR ACTIVE – {decode_mppt_error(err_code)}", C_RED)
-            else:
-                self._log(f"MPPT: error cleared (was {decode_mppt_error(self._prev_mppt_error)})", C_GREEN)
 
-        self._prev_mppt_error = err_code
+        elif self._mppt_err_state == "active":
+            if err_code == 0:
+                # Error cleared
+                self._mppt_err_state     = "recovering"
+                self._mppt_err_recover_t = now
+                if self._mppt_err_logged:
+                    duration = now - self._mppt_err_active_t
+                    mins = int(duration) // 60
+                    secs = int(duration) % 60
+                    dur_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+                    self._log(
+                        f"MPPT: error cleared (was {decode_mppt_error(self._mppt_err_code)}) "
+                        f"after {dur_str}", C_GREEN)
+            elif err_code != self._mppt_err_code:
+                # Different error code while active – log as new error
+                self._mppt_err_code     = err_code
+                self._mppt_err_active_t = now
+                self._mppt_err_logged   = True
+                self._log(f"MPPT: ERROR ACTIVE – {decode_mppt_error(err_code)}", C_RED)
+
+        elif self._mppt_err_state == "recovering":
+            if err_code:
+                if err_code == self._mppt_err_code:
+                    # Same error returned within cooldown – suppress
+                    self._mppt_err_state  = "active"
+                    self._mppt_err_logged = False
+                else:
+                    # Different error – log as new event
+                    self._mppt_err_state    = "active"
+                    self._mppt_err_code     = err_code
+                    self._mppt_err_active_t = now
+                    self._mppt_err_logged   = True
+                    self._log(f"MPPT: ERROR ACTIVE – {decode_mppt_error(err_code)}", C_RED)
+            elif now - self._mppt_err_recover_t >= self.ALARM_COOLDOWN_S:
+                # Cooldown expired – back to idle
+                self._mppt_err_state  = "idle"
+                self._mppt_err_code   = 0
+                self._mppt_err_logged = False
 
     # ── MQTT slots ────────────────────────────────────────────────────────────
     def _on_mqtt_connect(self):

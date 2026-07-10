@@ -37,6 +37,7 @@ DEFAULTS = {
     "MQTT_VICTRON_TOPIC_BASE": "victron",
     "BMS1_NAME":       "Battery 1",
     "BMS2_NAME":       "Battery 2",
+    "WEATHER_URL":     "",
 }
 
 # Matches:  #define NAME  "quoted string"      -> group('str')

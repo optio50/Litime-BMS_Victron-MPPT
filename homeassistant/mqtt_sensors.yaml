@@ -857,6 +857,28 @@ mqtt:
       icon: mdi:swap-horizontal
       device: *system_device
 
+    - name: "ESP32 Uptime"
+      unique_id: litime_esp32_uptime
+      state_topic: "litime/combined/state"
+      value_template: >-
+        {%- set s = value_json.uptime_s | int(0) -%}
+        {%- if s <= 0 -%} —
+        {%- else -%}
+          {%- set d = s // 86400 -%}
+          {%- set rem = s % 86400 -%}
+          {%- set h = rem // 3600 -%}
+          {%- set rem = rem % 3600 -%}
+          {%- set m = rem // 60 -%}
+          {%- set sec = rem % 60 -%}
+          {%- if d > 0 -%}{{ d }}d {{ '%02d' | format(h) }}h {{ '%02d' | format(m) }}m
+          {%- elif h > 0 -%}{{ h }}h {{ '%02d' | format(m) }}m
+          {%- elif m > 0 -%}{{ m }}m {{ '%02d' | format(sec) }}s
+          {%- else -%}{{ sec }}s
+          {%- endif -%}
+        {%- endif -%}
+      icon: mdi:timer-sand
+      entity_category: diagnostic
+      device: *system_device
 
 
     # ── Victron MPPT — full coverage (no firmware auto-discovery exists yet) ─

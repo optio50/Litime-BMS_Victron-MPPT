@@ -1,4 +1,5 @@
 PyQt5
+PyQtWebEngine
 pyqtgraph
 pglive
 paho-mqtt
