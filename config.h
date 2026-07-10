@@ -20,6 +20,12 @@
 #define MQTT_TOPIC_BASE  "litime"          // Topics: litime/battery1, litime/battery2, litime/combined
 #define MQTT_VICTRON_TOPIC_BASE  "victron"  // Topics: victron/state, victron/batt_v, etc.
 
+// --- Weather Forecast URL (shown in MPPT "Weather" sub-tab) ----------------
+// Point this at any weather page to get a quick solar/rain forecast.
+// International users: change "en-us" to your locale (en-gb, de-de, etc.)
+// and the city/state to your location (e.g. /in-London, /in-Berlin).
+#define WEATHER_URL  "https://www.msn.com/en-us/weather/forecast/in-YourCity,ST"
+
 // --- BLE MAC Addresses of each LiTime 48V 100Ah battery --------------------
 // Run a BLE scan (see README) to find the MAC addresses of your batteries.
 // Format: "AA:BB:CC:DD:EE:FF"  (case-insensitive)
