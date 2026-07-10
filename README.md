@@ -145,7 +145,8 @@ If you're replicating this setup:
 ```
 LiTime_BMS_Display.ino     Main Arduino sketch (setup/loop)
 LiTime_BMS_Display.h       Shared BatteryData / VictronData structs
-config.h                   ★ All user configuration lives here (WiFi, MQTT, BLE MACs, Victron key)
+config.h.example          ★ Template — copy to config.h and fill in your values (config.h is gitignored)
+config.h                   Your local config (WiFi, MQTT, BLE MACs, Victron key) — NOT tracked by git
 display_manager.cpp/.h     ILI9341 LCD rendering
 mqtt_manager.cpp/.h        MQTT publishing
 victron_mppt.cpp/.h        Victron BLE passive scan, AES-CTR decrypt, decode
@@ -229,8 +230,13 @@ Open **Library Manager** (Ctrl+Shift+I) and install:
 | **wolfssl** | wolfSSL Inc. | AES-128-CTR decryption of Victron BLE data |
 
 ### 3. Configuration
-Edit **`config.h`** before flashing — this is the single file with every
-user-specific setting (WiFi, MQTT, battery MACs, Victron MPPT MAC/key).
+Copy the template and fill in your values:
+```bash
+cp config.h.example config.h
+```
+Then edit **`config.h`** — this is the single file with every user-specific
+setting (WiFi, MQTT, battery MACs, Victron MPPT MAC/key). `config.h` is
+gitignored so your real credentials/keys never get committed.
 
 ```cpp
 // WiFi
@@ -392,7 +398,8 @@ The dashboard reads its MQTT broker address, port, credentials, and battery
 names directly out of the firmware's `config.h` (via `shared_config.py`) —
 **edit `config.h` once and both the firmware and the desktop app pick it
 up**. No separate Python config file needed. If `config.h` can't be found or
-parsed, the app falls back to safe defaults and prints a warning.
+parsed (e.g. you haven't copied `config.h.example` yet), the app falls back
+to safe defaults and prints a warning.
 
 ### Run
 ```bash

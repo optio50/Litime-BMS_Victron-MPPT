@@ -19,3 +19,7 @@ other/
 *.swp
 .DS_Store
 venv/
+
+# Local config with real credentials/keys — use config.h.example as template
+# (copy config.h.example to config.h and fill in your values)
+config.h
