@@ -28,7 +28,9 @@ from threading import Thread, Event
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QLabel, QProgressBar, QGroupBox,
-    QTextBrowser, QSplitter, QFrame, QSizePolicy
+    QTextBrowser, QSplitter, QFrame, QSizePolicy,
+    QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView
 )
 from PyQt5 import QtGui
 from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QObject, QIODevice, QByteArray
@@ -1188,12 +1190,13 @@ class OverviewTab(QWidget):
             i_ = bv("Current",  1)
             p_ = bv("Power",    2)
             t_ = bv("Cell °F",  3)
-            pr_ = bv("Protect",  4)
-            ba_ = bv("Balance",  5)
-            return grp, v_, i_, p_, t_, pr_, ba_
+            d_ = bv("Cell Δ",   4)
+            pr_ = bv("Protect",  5)
+            ba_ = bv("Balance",  6)
+            return grp, v_, i_, p_, t_, d_, pr_, ba_
 
-        b1m, self.b1_v, self.b1_i, self.b1_p, self.b1_tc, self.b1_prot, self.b1_bal = mini_group(BAT1_NAME)
-        b2m, self.b2_v, self.b2_i, self.b2_p, self.b2_tc, self.b2_prot, self.b2_bal = mini_group(BAT2_NAME)
+        b1m, self.b1_v, self.b1_i, self.b1_p, self.b1_tc, self.b1_delta, self.b1_prot, self.b1_bal = mini_group(BAT1_NAME)
+        b2m, self.b2_v, self.b2_i, self.b2_p, self.b2_tc, self.b2_delta, self.b2_prot, self.b2_bal = mini_group(BAT2_NAME)
         mid.addWidget(b1m, 1)
         mid.addWidget(b2m, 1)
         root.addLayout(mid)
@@ -1355,14 +1358,15 @@ class OverviewTab(QWidget):
         self.esp_uptime.setStyleSheet(f"color:{uptime_col}; font-size:13px; font-weight:bold;")
 
         # Per-battery quick view
-        for lbl_v, lbl_i, lbl_p, lbl_t, lbl_prot, lbl_bal, d in [
-            (self.b1_v, self.b1_i, self.b1_p, self.b1_tc, self.b1_prot, self.b1_bal, b1d),
-            (self.b2_v, self.b2_i, self.b2_p, self.b2_tc, self.b2_prot, self.b2_bal, b2d),
+        for lbl_v, lbl_i, lbl_p, lbl_t, lbl_delta, lbl_prot, lbl_bal, d in [
+            (self.b1_v, self.b1_i, self.b1_p, self.b1_tc, self.b1_delta, self.b1_prot, self.b1_bal, b1d),
+            (self.b2_v, self.b2_i, self.b2_p, self.b2_tc, self.b2_delta, self.b2_prot, self.b2_bal, b2d),
         ]:
             bv   = d.get("total_voltage",    0.0)
             bi   = d.get("current",          0.0)
             bp   = d.get("power",            0.0)
             bct  = d.get("cell_temp",        0)
+            bdl  = d.get("cell_delta_mv",    0.0)
             lbl_v.setText(f"{bv:.2f} V")
             lbl_i.setText(f"{bi:+.2f} A")
             lbl_i.setStyleSheet(
@@ -1372,6 +1376,10 @@ class OverviewTab(QWidget):
             lbl_p.setStyleSheet(
                 f"color:{bp_col}; font-size:13px; font-weight:bold;")
             lbl_t.setText(f"{c_to_f(bct):.0f} °F")
+            dl_col = C_GREEN if bdl < 20 else (C_YELLOW if bdl < 50 else C_RED)
+            lbl_delta.setText(f"{bdl:.1f} mV")
+            lbl_delta.setStyleSheet(
+                f"color:{dl_col}; font-size:13px; font-weight:bold;")
 
             prot_str = decode_protection(str(d.get("protection", "")))
             bal_str  = decode_balance(str(d.get("balancing", "")))
@@ -1671,8 +1679,8 @@ class Window(QMainWindow):
         self.setWindowIcon(QtGui.QIcon('icon.jpg'))
         self.resize(1280, 800)
 
-        tabs = QTabWidget()
-        self.setCentralWidget(tabs)
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
 
         self.overview_tab = OverviewTab()
         self.bat1_tab     = BatteryPanel(1)
@@ -1681,14 +1689,41 @@ class Window(QMainWindow):
         self.log_tab      = QTextBrowser()
         self.log_tab.setOpenExternalLinks(False)
 
+        # MQTT Raw tab — QTableWidget for flash-free, in-place cell updates.
+        self.mqtt_raw_tab = QTableWidget()
+        self.mqtt_raw_tab.setColumnCount(2)
+        self.mqtt_raw_tab.setHorizontalHeaderLabels(["Topic", "Payload"])
+        self.mqtt_raw_tab.verticalHeader().setVisible(False)
+        self.mqtt_raw_tab.horizontalHeader().setStretchLastSection(True)
+        self.mqtt_raw_tab.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.mqtt_raw_tab.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.mqtt_raw_tab.setAlternatingRowColors(True)
+        self.mqtt_raw_tab.setWordWrap(True)
+        self.mqtt_raw_tab.setTextElideMode(Qt.ElideNone)
+        # Per-pixel scroll mode so the scrollbar operates in pixels (not whole
+        # rows), which makes setSingleStep actually take effect and gives
+        # smooth, fine-grained scrolling over the tall word-wrapped JSON rows.
+        self.mqtt_raw_tab.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.mqtt_raw_tab.verticalScrollBar().setSingleStep(10)
+        self.mqtt_raw_tab.setStyleSheet(
+            f"QTableWidget {{ background: #111; color: {C_TEXT};"
+            f" gridline-color: {C_BORDER}; alternate-background-color: #1a1a1a; }}"
+            f"QHeaderView::section {{ background: {C_PANEL}; color: {C_DARKORANGE};"
+            f" font-weight: bold; border: 1px solid {C_BORDER}; padding: 4px; }}")
+        self._raw_mqtt: dict[str, str] = {}
+
+        # Wrap Log + MQTT Raw in a sub-tab widget under a single "Log" tab.
+        self.log_container = QTabWidget()
+        self.log_container.setDocumentMode(True)
+        self.log_container.addTab(self.log_tab,      "Event Log")
+        self.log_container.addTab(self.mqtt_raw_tab, "MQTT Raw")
+
         # Tabs: Overview | Battery 1 | Battery 2 | MPPT | Log
-        # Cells / Cell Δ / Temps / Ah Remaining are inside each battery's inner
-        # tab widget; MPPT's own charts are in its own inner tab widget.
-        tabs.addTab(self.overview_tab, "Overview")
-        tabs.addTab(self.bat1_tab,     BAT1_NAME)
-        tabs.addTab(self.bat2_tab,     BAT2_NAME)
-        tabs.addTab(self.mppt_tab,     "MPPT")
-        tabs.addTab(self.log_tab,      "Log")
+        self.tabs.addTab(self.overview_tab,  "Overview")
+        self.tabs.addTab(self.bat1_tab,      BAT1_NAME)
+        self.tabs.addTab(self.bat2_tab,      BAT2_NAME)
+        self.tabs.addTab(self.mppt_tab,      "MPPT")
+        self.tabs.addTab(self.log_container, "Log")
 
         # Status bar
         self.status_mqtt = QLabel("MQTT: connecting…")
@@ -1701,6 +1736,9 @@ class Window(QMainWindow):
         mqtt_signals.disconnected.connect(self._on_mqtt_disconnect)
         mqtt_signals.message_received.connect(self._on_message)
         mqtt_signals.mqtt_error.connect(self._on_mqtt_error)
+
+        # Force an immediate MQTT Raw refresh when the user switches to it
+        self.log_container.currentChanged.connect(self._on_log_subtab_changed)
 
         # UI refresh every 2 s
         self.timer = QTimer()
@@ -1939,6 +1977,9 @@ class Window(QMainWindow):
         global bat, combined, broker_status, victron_data
         self.overview_tab.mqtt_indicator.flash()
 
+        # Capture raw topic→payload for the MQTT Raw debug tab (latest only)
+        self._raw_mqtt[topic] = payload
+
         try:
             # LiTime status (LWT string, not JSON)
             if topic == f"{TOPIC_BASE}/status":
@@ -1996,6 +2037,10 @@ class Window(QMainWindow):
         self.bat2_tab.refresh(b2)
         self.mppt_tab.refresh(vict)
 
+        # Update MQTT Raw table when visible (QTableWidget = no flash)
+        if self._mqtt_raw_visible():
+            self._refresh_mqtt_raw()
+
         # Periodic 10-minute summary in Log tab
         now = time.time()
         if now - self._last_summary_t >= self._summary_interval_s:
@@ -2032,6 +2077,100 @@ class Window(QMainWindow):
             f'<span style="color:{color}">{msg}</span>'
         )
 
+
+
+    def _on_log_subtab_changed(self, index: int):
+        """Force an immediate MQTT Raw refresh when the user switches to it."""
+        if self.log_container.widget(index) is self.mqtt_raw_tab:
+            self._refresh_mqtt_raw()
+
+    def _mqtt_raw_visible(self) -> bool:
+        """True only when the top-level Log tab AND MQTT Raw sub-tab are active."""
+        if self.tabs.currentWidget() is not self.log_container:
+            return False
+        return self.log_container.currentWidget() is self.mqtt_raw_tab
+
+    def _refresh_mqtt_raw(self):
+        """Update the MQTT Raw table from the latest self._raw_mqtt snapshot.
+        Uses QTableWidget so individual cells are updated in-place — no flash,
+        no scroll reset. Only changed rows are touched."""
+        _REDUNDANT_SUFFIXES = (
+            "/soc", "/voltage", "/current", "/power",
+            "/cells/cell01", "/cells/cell02", "/cells/cell03", "/cells/cell04",
+            "/cells/cell05", "/cells/cell06", "/cells/cell07", "/cells/cell08",
+            "/cells/cell09", "/cells/cell10", "/cells/cell11", "/cells/cell12",
+            "/cells/cell13", "/cells/cell14", "/cells/cell15", "/cells/cell16",
+        )
+        filtered = {
+            t: v for t, v in self._raw_mqtt.items()
+            if not any(t.endswith(s) for s in _REDUNDANT_SUFFIXES)
+        }
+
+        _GROUP_ORDER = [
+            [f"{TOPIC_BASE}/status"],
+            [f"{TOPIC_BASE}/battery1/state"],
+            [f"{TOPIC_BASE}/battery2/state"],
+            [f"{TOPIC_BASE}/combined/state"],
+            [f"{VICTRON_TOPIC_BASE}/state",
+             f"{VICTRON_TOPIC_BASE}/state_str",
+             f"{VICTRON_TOPIC_BASE}/batt_v",
+             f"{VICTRON_TOPIC_BASE}/batt_a",
+             f"{VICTRON_TOPIC_BASE}/pv_w",
+             f"{VICTRON_TOPIC_BASE}/yield_today"],
+        ]
+        seen = set()
+        for topics in _GROUP_ORDER:
+            seen.update(topics)
+        extra = [t for t in sorted(filtered) if t not in seen]
+        ordered_topics = []
+        for topics in _GROUP_ORDER:
+            ordered_topics.extend(topics)
+        ordered_topics.extend(extra)
+        ordered_topics = [t for t in ordered_topics if t in filtered]
+
+        if not ordered_topics:
+            self.mqtt_raw_tab.setRowCount(1)
+            self.mqtt_raw_tab.setItem(0, 0, QTableWidgetItem(""))
+            item = QTableWidgetItem("Waiting for MQTT messages…")
+            item.setForeground(QColor(C_DIM))
+            self.mqtt_raw_tab.setItem(0, 1, item)
+            return
+
+        self.mqtt_raw_tab.setRowCount(len(ordered_topics))
+
+        for row, topic in enumerate(ordered_topics):
+            payload = filtered[topic]
+            try:
+                parsed = json.loads(payload)
+                display = json.dumps(parsed, indent=2)
+            except (json.JSONDecodeError, ValueError):
+                display = payload or "(empty)"
+
+            old_topic = self.mqtt_raw_tab.item(row, 0)
+            if old_topic is None or old_topic.text() != topic:
+                item = QTableWidgetItem(topic)
+                item.setForeground(QColor(C_CYAN))
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignTop)
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                self.mqtt_raw_tab.setItem(row, 0, item)
+
+            old_payload = self.mqtt_raw_tab.item(row, 1)
+            if old_payload is None or old_payload.text() != display:
+                item = QTableWidgetItem(display)
+                item.setForeground(QColor(C_TEXT))
+                font = item.font()
+                font.setFamily("monospace")
+                font.setPointSize(9)
+                item.setFont(font)
+                self.mqtt_raw_tab.setItem(row, 1, item)
+
+        if len(ordered_topics) != getattr(self, "_last_raw_row_count", 0):
+            self._last_raw_row_count = len(ordered_topics)
+            self.mqtt_raw_tab.horizontalHeader().setSectionResizeMode(
+                0, QHeaderView.ResizeToContents)
+        self.mqtt_raw_tab.resizeRowsToContents()
 
 # =============================================================================
 #  ─── ENTRY POINT ──────────────────────────────────────────────────────────────
