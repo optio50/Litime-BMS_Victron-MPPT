@@ -273,7 +273,13 @@ mqtt:
             {%- set ns.active = ns.active + ['Cell ' ~ (n - i)] -%}
           {%- endif -%}
         {%- endfor -%}
-        {{ ns.active | join(', ') if ns.active else 'None' }}
+        {%- if ns.active -%}
+          {{ ns.active | join(', ') }}
+        {%- elif (value_json.battery_state | int(0, 16)) & 4 -%}
+          Active (no cells)
+        {%- else -%}
+          None
+        {%- endif -%}
       icon: mdi:scale-balance
       device: *battery1_device
 
@@ -608,7 +614,13 @@ mqtt:
             {%- set ns.active = ns.active + ['Cell ' ~ (n - i)] -%}
           {%- endif -%}
         {%- endfor -%}
-        {{ ns.active | join(', ') if ns.active else 'None' }}
+        {%- if ns.active -%}
+          {{ ns.active | join(', ') }}
+        {%- elif (value_json.battery_state | int(0, 16)) & 4 -%}
+          Active (no cells)
+        {%- else -%}
+          None
+        {%- endif -%}
       icon: mdi:scale-balance
       device: *battery2_device
 
@@ -809,6 +821,16 @@ mqtt:
       unit_of_measurement: "Ah"
       state_class: measurement
       suggested_display_precision: 1
+      device: *system_device
+
+    - name: "Combined Remaining kWh"
+      unique_id: litime_combined_remaining_kwh
+      state_topic: "litime/combined/state"
+      value_template: "{{ value_json.total_remaining_wh }}"
+      unit_of_measurement: "kWh"
+      device_class: energy
+      state_class: measurement
+      suggested_display_precision: 2
       device: *system_device
 
     - name: "Combined Full Capacity"

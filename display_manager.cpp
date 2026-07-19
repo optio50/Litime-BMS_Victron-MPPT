@@ -22,15 +22,25 @@ static String _decodeProt(const String& hex) {
     for (const auto& p : PROT_BITS) if (v & (1UL << p.bit)) { if (o.length()) o += " "; o += p.abbr; }
     return o.length() ? o : "None";
 }
-static String _decodeBalance(const String& bin32) {
+static String _decodeBalance(const String& bin32, const String& stateHex = "") {
     // bin32 is a big-endian binary string of the 32-bit balancing register
     // (char 0 = bit31 ... last char = bit0 = cell 1), so cell number for a
     // given index is (length - index), not (index + 1).
+    //
+    // The BMS also exposes a separate batteryState hex bitmask where bit 2
+    // = "Balancing" — i.e. the pack is *in* a balancing phase. The per-cell
+    // shunting register can be momentarily all-zeros between balancing pulses
+    // or while the BMS evaluates which cells to shunt, so when the state says
+    // "Balancing" but no cells are actively shunting right now we report
+    // "Active (no cells)" instead of the misleading "None".
     String o;
     int len = bin32.length();
     for (int i = 0; i < len; i++)
         if (bin32[i] == '1') { if (o.length()) o += ' '; o += 'B'; o += String(len - i); }
-    return o.length() ? o : "None";
+    if (o.length()) return o;
+    // No cells shunting right now — check the state bit.
+    uint16_t sv = (uint16_t)strtoul(stateHex.c_str() + (stateHex.startsWith("0x") || stateHex.startsWith("0X") ? 2 : 0), nullptr, 16);
+    return (sv & 0x04) ? "Active (no cells)" : "None";
 }
 static String _decodeBattState(const String& hex) {
     uint16_t v = (uint16_t)strtoul(hex.c_str() + (hex.startsWith("0x") || hex.startsWith("0X") ? 2 : 0), nullptr, 16);
@@ -456,7 +466,7 @@ void DisplayManager::_pageBattery(const BatteryData& b, const BatteryData& other
 
     // Protection / balance / state  (decoded to human-readable text)
     String protStr = _decodeProt(b.protectionState);
-    String balStr  = _decodeBalance(b.balancingState);
+    String balStr  = _decodeBalance(b.balancingState, b.batteryState);
     String stStr   = _decodeBattState(b.batteryState);
     uint16_t protCol = (protStr == "None") ? COL_GREEN : COL_RED;
     uint16_t balCol  = (balStr  == "None") ? COL_DIM   : COL_BLUE;

@@ -81,6 +81,8 @@ RAND_ID      = random.randint(1, 1000)
 BAT1_NAME    = _cfg["BMS1_NAME"]
 BAT2_NAME    = _cfg["BMS2_NAME"]
 WEATHER_URL  = _cfg.get("WEATHER_URL", "")
+SOC_RESERVE_PCT = _cfg.get("SOC_RESERVE_PCT", 10)
+ARRAY_NAME   = _cfg.get("ARRAY_NAME", "Solar Array")
 BAT_NAME     = {1: BAT1_NAME, 2: BAT2_NAME}
 
 # All charts are fed once per UI refresh tick (self.timer, 2 s interval —
@@ -177,7 +179,7 @@ bat: dict = {
 combined: dict = {
     "soc_avg": 0.0, "soc_b1": 0, "soc_b2": 0,
     "total_current": 0.0, "total_power": 0.0,
-    "total_remaining_ah": 0.0, "total_capacity_ah": 0.0,
+    "total_remaining_ah": 0.0, "total_remaining_wh": 0.0, "total_capacity_ah": 0.0,
     "time_remaining_s": 0, "time_direction": "idle", "flow": "idle",
     "uptime_s": 0,
 }
@@ -332,7 +334,7 @@ def decode_battery_state(hex_str: str) -> str:
     flags = [name for bit, name in _STATE_BITS if val & (1 << bit)]
     return " / ".join(flags) if flags else "Idle"
 
-def decode_balance(bin_str: str) -> str:
+def decode_balance(bin_str: str, state_hex: str = "") -> str:
     """Return 'B1 B4 B8 …' for cells being balanced, or 'None'.
 
     The BMS reports the balancing register as a 32-bit value packed into a
@@ -340,13 +342,32 @@ def decode_balance(bin_str: str) -> str:
     of the highest byte first). That means character index 0 is bit 31 and
     the *last* character is bit 0 = cell 1, so the cell number for a given
     string index is `len(string) - index`, NOT `index + 1`.
+
+    The BMS also exposes a separate `batteryState` hex bitmask where bit 2
+    = "Balancing" — i.e. the pack is *in* a balancing phase. The per-cell
+    shunting register can be momentarily all-zeros between balancing pulses
+    or while the BMS evaluates which cells to shunt, so when the state says
+    "Balancing" but no cells are actively shunting right now we report
+    "Active (no cells)" instead of the misleading "None".
     """
     if not bin_str:
-        return "None"
+        # No per-cell register — fall back to the state bit if present.
+        try:
+            sv = int(state_hex, 16) if state_hex else 0
+        except (ValueError, TypeError):
+            sv = 0
+        return "Active (no cells)" if (sv & 0x04) else "None"
     s = str(bin_str)
     n = len(s)
     cells = [n - i for i, c in enumerate(s) if c == "1"]
-    return " ".join(f"B{c}" for c in sorted(cells)) if cells else "None"
+    if cells:
+        return " ".join(f"B{c}" for c in sorted(cells))
+    # No cells shunting right now — check the state bit.
+    try:
+        sv = int(state_hex, 16) if state_hex else 0
+    except (ValueError, TypeError):
+        sv = 0
+    return "Active (no cells)" if (sv & 0x04) else "None"
 
 
 # =============================================================================
@@ -519,7 +540,7 @@ class MqttLedWidget(QWidget):
 
 
 def soc_color(soc):
-    if soc >= 60: return C_GREEN
+    if soc >= 50: return C_GREEN
     if soc >= 30: return C_ORANGE
     if soc >= 15: return C_ORANGERED
     return C_RED
@@ -554,7 +575,7 @@ def fmt_time(seconds, direction="idle") -> str:
     if h:        parts.append(f"{h}h")
     if h or m:   parts.append(f"{m:02d}m")
     if not parts: parts.append("0m")
-    suffix = "to Full" if direction == "to_full" else "to Reserve"
+    suffix = "to Full" if direction == "to_full" else f"to Reserve ({SOC_RESERVE_PCT}%)"
     return " ".join(parts) + " " + suffix
 
 def c_to_f(c):
@@ -740,7 +761,7 @@ class BatteryPanel(QWidget):
         top = QHBoxLayout()
 
         soc_grp = QGroupBox("State of Charge")
-        soc_grp.setMaximumWidth(240)
+        soc_grp.setMaximumWidth(720)
         soc_lay = QVBoxLayout(soc_grp)
         self.soc_bar   = QProgressBar()
         self.soc_bar.setRange(0, 100)
@@ -749,7 +770,7 @@ class BatteryPanel(QWidget):
                                     align=Qt.AlignCenter)
         soc_lay.addWidget(self.soc_bar)
         soc_lay.addWidget(self.soc_label)
-        top.addWidget(soc_grp)
+        top.addWidget(soc_grp, 1)
 
         vi_grp = QGroupBox("Voltage / Current")
         vi_lay = QGridLayout(vi_grp)
@@ -961,7 +982,8 @@ class BatteryPanel(QWidget):
 
         # Decoded protection / balance / state
         prot_str = decode_protection(str(d.get("protection", "")))
-        bal_str  = decode_balance(str(d.get("balancing", "")))
+        bal_str  = decode_balance(str(d.get("balancing", "")),
+                                  str(d.get("battery_state", "")))
         st_str   = decode_battery_state(str(d.get("battery_state", "")))
 
         prot_col = C_RED if prot_str != "None" else C_GREEN
@@ -1053,7 +1075,7 @@ class OverviewTab(QWidget):
         root.addLayout(status_row)
 
 
-        # ── SOC row: Combined | Battery 1 | Battery 2  (single horizontal row) ──
+        # ── SOC row: Combined only, centered (1/3 of row width) ──────────────
         soc_row = QHBoxLayout()
         soc_row.setSpacing(6)
 
@@ -1062,7 +1084,7 @@ class OverviewTab(QWidget):
             lay = QVBoxLayout(grp)
             lay.setSpacing(3)
             bar = QProgressBar()
-            bar.setRange(0, 100)
+            bar.setRange(0, 1000)
             bar.setFixedHeight(20)
             bar.setMinimumWidth(100)
             v_lbl = make_label("0.00 V", C_MEDBLUE, bold=True, size=15, align=Qt.AlignCenter)
@@ -1072,14 +1094,10 @@ class OverviewTab(QWidget):
 
         comb_soc_grp, self.comb_soc_bar, self.comb_v_lbl = \
             make_soc_group("Combined")
-        b1_soc_grp, self.soc1_bar, self.v1_lbl = \
-            make_soc_group(BAT1_NAME)
-        b2_soc_grp, self.soc2_bar, self.v2_lbl = \
-            make_soc_group(BAT2_NAME)
 
+        soc_row.addStretch(1)
         soc_row.addWidget(comb_soc_grp, 1)
-        soc_row.addWidget(b1_soc_grp,   1)
-        soc_row.addWidget(b2_soc_grp,   1)
+        soc_row.addStretch(1)
         root.addLayout(soc_row)
 
         # ── MPPT + combined stats row ─────────────────────────────────────────
@@ -1089,7 +1107,7 @@ class OverviewTab(QWidget):
         # MPPT Solar Controller panel — two aligned columns separated by a
         # vertical divider so left (measurements) and right (status) data
         # don't visually blend together, and every label/value row lines up.
-        mppt_grp   = QGroupBox("MPPT Solar Controller")
+        mppt_grp   = QGroupBox(f"MPPT Solar Controller {ARRAY_NAME}")
         mppt_outer = QHBoxLayout(mppt_grp)
         mppt_outer.setSpacing(8)
 
@@ -1168,9 +1186,12 @@ class OverviewTab(QWidget):
         self.tot_pwr  = cv("Total Power",   1)
         self.tot_cur  = cv("Total Current", 2)
         self.tot_rem  = cv("Remaining Ah",  3)
-        self.tot_time = cv("Time Rem",      4)
-        self.flow_lbl = cv("Flow",          5)
-        self.esp_uptime = cv("ESP32 Uptime", 6)
+        self.tot_rem_wh = cv("Remaining Wh", 4)
+        self.tot_rem_wh.setToolTip(
+            "Remaining Ah × Pack Voltage ÷ 1000 = kWh")
+        self.tot_time = cv("Time Rem",      5)
+        self.flow_lbl = cv("Flow",          6)
+        self.esp_uptime = cv("ESP32 Uptime", 7)
         self._last_uptime = -1
         self._uptime_change_time = time.time()
         mid.addWidget(comb_grp, 1)
@@ -1259,14 +1280,10 @@ class OverviewTab(QWidget):
         v2      = b2d.get("total_voltage", 0.0)
         v_avg   = (v1 + v2) / 2.0
 
-        for bar, v_lbl, soc, v in [
-            (self.comb_soc_bar, self.comb_v_lbl, int(avg_soc), v_avg),
-            (self.soc1_bar,     self.v1_lbl,     s1,           v1),
-            (self.soc2_bar,     self.v2_lbl,     s2,           v2),
-        ]:
-            bar.setValue(soc)
-            bar.setStyleSheet(soc_bar_style(soc))
-            v_lbl.setText(f"{v:.2f} V")
+        self.comb_soc_bar.setValue(int(round(avg_soc * 10)))
+        self.comb_soc_bar.setFormat(f"{avg_soc:.1f}%")
+        self.comb_soc_bar.setStyleSheet(soc_bar_style(int(avg_soc)))
+        self.comb_v_lbl.setText(f"{v_avg:.2f} V")
 
         # MPPT panel
         valid = vict.get("valid", False)
@@ -1312,6 +1329,10 @@ class OverviewTab(QWidget):
         self.tot_cur.setStyleSheet(
             f"color:{i_col}; font-size:13px; font-weight:bold;")
         self.tot_rem.setText(f"{tr:.1f} Ah")
+        # Wh remaining comes from the firmware combined payload (total_remaining_wh),
+        # computed there as sum of (per-battery remaining Ah × pack voltage) in kWh.
+        trw = comb.get("total_remaining_wh", 0.0)
+        self.tot_rem_wh.setText(f"{trw:.2f} kWh")
         self.tot_time.setText(fmt_time(trs, tdir))
         self.flow_lbl.setText(flow.upper())
         self.flow_lbl.setStyleSheet(
@@ -1382,7 +1403,8 @@ class OverviewTab(QWidget):
                 f"color:{dl_col}; font-size:13px; font-weight:bold;")
 
             prot_str = decode_protection(str(d.get("protection", "")))
-            bal_str  = decode_balance(str(d.get("balancing", "")))
+            bal_str  = decode_balance(str(d.get("balancing", "")),
+                                      str(d.get("battery_state", "")))
             lbl_prot.setText(prot_str)
             lbl_prot.setStyleSheet(
                 f"color:{C_RED if prot_str != 'None' else C_GREEN}; font-size:11px; font-weight:bold;")
@@ -1869,7 +1891,8 @@ class Window(QMainWindow):
                 self._log(f"{name}: protection cleared", C_GREEN)
         prev["protection"] = prot
 
-        bal = decode_balance(str(data.get("balancing", ""))).strip()
+        bal = decode_balance(str(data.get("balancing", "")),
+                             str(data.get("battery_state", ""))).strip()
         if prev["balancing"] is not None and bal != prev["balancing"]:
             col = C_CYAN if bal != "None" else C_DIM
             self._log(f"{name}: balance → {bal}", col)

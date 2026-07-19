@@ -210,6 +210,11 @@ void MQTTManager::_publishCombined(const BatteryData& b1, const BatteryData& b2)
     doc["total_current"]    = serialized(String(totalI, 3));
     doc["total_power"]      = serialized(String(totalP, 1));
     doc["total_remaining_ah"] = serialized(String(totalRemAh, 2));
+    // Wh remaining = sum of (per-battery remaining Ah × pack voltage),
+    // published in kWh for direct comparability with MPPT "Yield Today".
+    float totalRemWh = (b1.remainingAh * b1.totalVoltage) +
+                       (b2.remainingAh * b2.totalVoltage);
+    doc["total_remaining_wh"] = serialized(String(totalRemWh / 1000.0f, 2));
     doc["total_capacity_ah"]  = serialized(String(totalCapAh, 2));
     doc["time_remaining_s"]   = timeRem;
     doc["time_direction"]     = timeDir;  // "to_full" | "to_empty" | "idle"

@@ -38,6 +38,8 @@ DEFAULTS = {
     "BMS1_NAME":       "Battery 1",
     "BMS2_NAME":       "Battery 2",
     "WEATHER_URL":     "https://www.msn.com/en-us/weather/forecast/in-Phoenix,AZ",
+    "SOC_RESERVE_PCT": 10,
+    "ARRAY_NAME":       "Solar Array",
 }
 
 # Matches:  #define NAME  "quoted string"      -> group('str')
