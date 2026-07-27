@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QGridLayout, QLabel, QProgressBar, QGroupBox,
     QTextBrowser, QSplitter, QFrame, QSizePolicy,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView
+    QAbstractItemView, QPushButton
 )
 from PyQt5 import QtGui
 from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QObject, QIODevice, QByteArray
@@ -812,6 +812,7 @@ class BatteryPanel(QWidget):
             return lbl
 
         self.remain_ah  = kv("Remaining Ah")
+        self.remain_wh  = kv("Remaining Wh")
         self.full_ah    = kv("Full Capacity")
         self.soh_val    = kv("SOH")
         self.cycles     = kv("Discharge Cycles")
@@ -825,6 +826,7 @@ class BatteryPanel(QWidget):
         self.batt_state = kv("State")
 
         sv.addWidget(stats_grp)
+
         sv.addStretch()
         mid.addWidget(stats_w)
 
@@ -834,8 +836,8 @@ class BatteryPanel(QWidget):
         name = BAT_NAME[self.bat_id]
 
         # ── Tab 1: Power ──────────────────────────────────────────────────
-        p_plot = LiveLinePlot(pen=pg.mkPen(C_ORANGE, width=1.5), name="Power",
-                              fillLevel=0, brush=(255, 238, 88, 60))
+        p_plot = LiveLinePlot(pen=pg.mkPen(C_ORANGERED, width=1.5), name="Power",
+                              fillLevel=0, brush=(255, 69, 0, 50))
         self.p_connector = make_connector(p_plot)
         self.p_chart     = make_chart(f"{name} – Power (24 hrs)", y_label="Watts")
         self.p_chart.addItem(p_plot)
@@ -962,6 +964,10 @@ class BatteryPanel(QWidget):
         # combined estimate on the Overview tab is the single source of truth.
 
         self.remain_ah.setText(f"{d.get('remaining_ah', 0):.1f} Ah")
+        # Wh remaining = remaining Ah × pack voltage, shown in kWh to match
+        # the Overview tab (firmware combined: totalRemWh/1000).
+        _rem_wh = d.get('remaining_ah', 0.0) * d.get('total_voltage', 0.0)
+        self.remain_wh.setText(f"{_rem_wh / 1000.0:.2f} kWh")
         self.full_ah.setText(f"{d.get('full_capacity_ah', 0):.1f} Ah")
         self.soh_val.setText(str(d.get("soh", "—")))
         self.cycles.setText(str(d.get("discharge_cycles", 0)))
@@ -1025,7 +1031,7 @@ class OverviewTab(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setSpacing(6)
+        root.setSpacing(3)
 
         # ── status strip ─────────────────────────────────────────────────────
         # Each item is wrapped in a small vertical-stretch container so it is
@@ -1044,49 +1050,50 @@ class OverviewTab(QWidget):
             vlay.addStretch(1)
             return container
 
-        status_row = QHBoxLayout()
+        # ── Merged status + SOC row ────────────────────────────────────────
+        # Left: [MQTT] [B1] [B2] [MPPT] [ICON]  |  Right: [SOC progressbar] [timestamp]
+        # The SOC row is eliminated as a separate row — its content moves to
+        # the right side of this merged row, saving ~50px of vertical space.
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
 
         self.mqtt_indicator = MqttLedWidget()
         self.b1_led   = make_label(f"⬤  {BAT1_NAME}", C_RED,  bold=True, size=11)
         self.b2_led   = make_label(f"⬤  {BAT2_NAME}", C_RED,  bold=True, size=11)
         self.mppt_led = make_label("⬤  MPPT",          C_RED,  bold=True, size=11)
-        self.ts_lbl   = make_label("—",                 C_DIM,             size=10)
-        status_row.addWidget(vcenter(self.mqtt_indicator))
-        status_row.addSpacing(12)
-        status_row.addWidget(vcenter(self.b1_led))
-        status_row.addSpacing(12)
-        status_row.addWidget(vcenter(self.b2_led))
-        status_row.addSpacing(12)
-        status_row.addWidget(vcenter(self.mppt_led))
+        top_row.addWidget(vcenter(self.mqtt_indicator))
+        top_row.addSpacing(12)
+        top_row.addWidget(vcenter(self.b1_led))
+        top_row.addSpacing(12)
+        top_row.addWidget(vcenter(self.b2_led))
+        top_row.addSpacing(12)
+        top_row.addWidget(vcenter(self.mppt_led))
 
-        # App icon/logo, shown at native aspect ratio scaled to strip height
-        status_row.addSpacing(12)
+        # App icon/logo — the divider between left and right sides
         self.logo_lbl = QLabel()
         _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.jpg")
         _pix = QPixmap(_icon_path)
         if not _pix.isNull():
             self.logo_lbl.setPixmap(
                 _pix.scaledToHeight(48, Qt.SmoothTransformation))
-        status_row.addWidget(vcenter(self.logo_lbl))
+        top_row.addWidget(vcenter(self.logo_lbl))
 
-        status_row.addStretch()
-        status_row.addWidget(vcenter(self.ts_lbl))
-
-        root.addLayout(status_row)
-
-
-        # ── SOC row: Combined only, centered (1/3 of row width) ──────────────
-        soc_row = QHBoxLayout()
-        soc_row.setSpacing(6)
+        # Right side: SOC progressbar groupbox + timestamp, stacked vertically
+        right_side = QWidget()
+        right_side.setMinimumWidth(640)
+        right_lay = QVBoxLayout(right_side)
+        right_lay.setSpacing(2)
+        right_lay.setContentsMargins(0, 0, 0, 0)
 
         def make_soc_group(title):
             grp = QGroupBox(title)
             lay = QVBoxLayout(grp)
-            lay.setSpacing(3)
+            lay.setSpacing(1)
+            lay.setContentsMargins(4, 4, 4, 4)
             bar = QProgressBar()
             bar.setRange(0, 1000)
-            bar.setFixedHeight(20)
-            bar.setMinimumWidth(100)
+            bar.setFixedHeight(24)
+            bar.setMinimumWidth(600)
             v_lbl = make_label("0.00 V", C_MEDBLUE, bold=True, size=15, align=Qt.AlignCenter)
             lay.addWidget(bar)
             lay.addWidget(v_lbl)
@@ -1094,11 +1101,16 @@ class OverviewTab(QWidget):
 
         comb_soc_grp, self.comb_soc_bar, self.comb_v_lbl = \
             make_soc_group("Combined")
+        right_lay.addStretch(1)
+        right_lay.addWidget(comb_soc_grp, alignment=Qt.AlignCenter)
+        right_lay.addStretch(1)
 
-        soc_row.addStretch(1)
-        soc_row.addWidget(comb_soc_grp, 1)
-        soc_row.addStretch(1)
-        root.addLayout(soc_row)
+        self.ts_lbl = make_label("—", C_DIM, size=10,
+                                 align=Qt.AlignRight | Qt.AlignVCenter)
+        right_lay.addWidget(self.ts_lbl)
+
+        top_row.addWidget(right_side, 1)
+        root.addLayout(top_row)
 
         # ── MPPT + combined stats row ─────────────────────────────────────────
         mid = QHBoxLayout()
@@ -1238,14 +1250,45 @@ class OverviewTab(QWidget):
         self.soc_chart.addItem(socavg_plot)
         self.soc_chart.setYRange(0, 105)
 
-        pwr_plot = LiveLinePlot(pen=pg.mkPen(C_ORANGE, width=2), name="Total Power",
-                                fillLevel=0, brush=(255, 238, 88, 50))
+        pwr_plot = LiveLinePlot(pen=pg.mkPen(C_ORANGERED, width=2), name="Total Power",
+                                fillLevel=0, brush=(255, 69, 0, 50))
         self.pwr_connector = make_connector(pwr_plot)
+        cur_plot = LiveLinePlot(pen=pg.mkPen(C_GREEN, width=2), name="Total Current")
+        self.cur_connector = make_connector(cur_plot)
         self.pwr_chart     = make_chart("Combined Power – 24 Hours", y_label="Watts", roll=CHART_ROLL_SPLIT)
         self.pwr_chart.addItem(pwr_plot)
+        self.pwr_chart.addItem(cur_plot)
 
-        charts_split.addWidget(self.soc_chart)
-        charts_split.addWidget(self.pwr_chart)
+        # Left half: tabbed widget holding the SOC chart and Wh Remaining chart
+        left_tabs = QTabWidget()
+        left_tabs.setDocumentMode(True)
+
+        soc_w = QWidget(); soc_l = QVBoxLayout(soc_w); soc_l.setContentsMargins(0, 0, 0, 0)
+        soc_l.addWidget(self.soc_chart)
+        left_tabs.addTab(soc_w, "SOC")
+
+        wh_plot = LiveLinePlot(pen=pg.mkPen(C_BLUE, width=1.5), name="Wh Remaining",
+                               fillLevel=0, brush=(0, 0, 108, 200))
+        self.wh_rem_connector = make_connector(wh_plot)
+        self.wh_rem_chart = make_chart("Wh Remaining – 24 Hours", y_label="kWh", roll=CHART_ROLL_SPLIT)
+        self.wh_rem_chart.addItem(wh_plot)
+        wh_w = QWidget(); wh_l = QVBoxLayout(wh_w); wh_l.setContentsMargins(0, 0, 0, 0)
+        wh_l.addWidget(self.wh_rem_chart)
+        left_tabs.addTab(wh_w, "Wh Remaining")
+
+        # Right half: wrap pwr_chart in a container with a top spacer matching
+        # the left tab widget's tab bar height, so both charts have equal
+        # plot area height (the tab bar eats ~30px on the left side).
+        right_w = QWidget()
+        right_l = QVBoxLayout(right_w)
+        right_l.setContentsMargins(0, 0, 0, 0)
+        right_l.setSpacing(0)
+        _tab_bar_h = left_tabs.tabBar().sizeHint().height()
+        right_l.addSpacing(_tab_bar_h)
+        right_l.addWidget(self.pwr_chart)
+
+        charts_split.addWidget(left_tabs)
+        charts_split.addWidget(right_w)
         root.addWidget(charts_split, 1)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1417,6 +1460,9 @@ class OverviewTab(QWidget):
         self.soc2_connector.cb_append_data_point(float(s2),       ts)
         self.socavg_connector.cb_append_data_point(float(avg_soc), ts)
         self.pwr_connector.cb_append_data_point(float(tp),         ts)
+        self.cur_connector.cb_append_data_point(float(tc),         ts)
+        trw = comb.get("total_remaining_wh", 0.0)
+        self.wh_rem_connector.cb_append_data_point(float(trw),     ts)
 
 
 # =============================================================================
@@ -1441,9 +1487,22 @@ MPPT_STATE_COLORS = {
 }
 
 class _QuietWebPage(QWebEnginePage):
-    """Suppress noisy JS console messages from embedded web pages."""
+    """Suppress noisy JS console messages from embedded web pages, and make
+    links that try to open a new window/tab (target="_blank", window.open(),
+    ctrl-click, etc.) navigate in-place instead of silently doing nothing.
+
+    QWebEngineView has no tab/window manager of its own, so by default
+    createWindow() returns None and Chromium just drops the navigation —
+    which is why most links on weather/news sites (many open forecasts,
+    articles, and ads in a new tab) appear completely dead. Returning
+    `self` here tells Chromium "navigate the requested URL in this same
+    page" instead of trying to spawn a new top-level window we don't have.
+    """
     def javaScriptConsoleMessage(self, level, message, line, source):
         pass  # discard all JS console output
+
+    def createWindow(self, _type):
+        return self
 
 
 class MpptTab(QWidget):
@@ -1487,6 +1546,21 @@ class MpptTab(QWidget):
         self.age_val     = kv("Last Seen")
 
         sv.addWidget(stats_grp)
+
+        # ── Combined SOC bar (mirrors the Overview tab's combined SOC) ────
+        # Placed inside stats_w (max width 280) so it's width-constrained to
+        # match the MPPT Statistics groupbox above it — no chart area lost.
+        comb_grp = QGroupBox("Combined SOC")
+        comb_lay = QVBoxLayout(comb_grp)
+        comb_lay.setSpacing(3)
+        self.comb_soc_bar = QProgressBar()
+        self.comb_soc_bar.setRange(0, 1000)
+        self.comb_soc_bar.setFixedHeight(20)
+        self.comb_soc_bar.setFormat("0.0%")
+        self.comb_soc_bar.setStyleSheet(soc_bar_style(0))
+        comb_lay.addWidget(self.comb_soc_bar)
+        sv.addWidget(comb_grp)
+
         sv.addStretch()
         mid.addWidget(stats_w)
 
@@ -1528,19 +1602,79 @@ class MpptTab(QWidget):
         chart_tabs.addTab(sw, "Charger State")
 
         # ── Weather forecast browser ──────────────────────────────────────
+        # A small nav toolbar (Back / Forward / Reload / Home) is added above
+        # the view because many weather sites (e.g. MSN Weather) use
+        # client-side/AJAX navigation for location changes rather than full
+        # page loads, so Chromium's history often has nothing to go "back"
+        # to and the right-click context-menu "Back" entry appears to do
+        # nothing. These buttons give a reliable way to navigate regardless.
         if WEATHER_URL:
             self.weather_view = QWebEngineView()
             self.weather_view.setPage(_QuietWebPage(self.weather_view))
             self.weather_view.setUrl(QUrl(WEATHER_URL))
+
+            nav_bar = QHBoxLayout()
+            nav_bar.setContentsMargins(4, 4, 4, 4)
+            nav_bar.setSpacing(4)
+
+            btn_style = (
+                f"QPushButton {{ background:{C_PANEL}; color:{C_TEXT};"
+                f" border:1px solid {C_BORDER}; border-radius:3px; padding:3px 10px; }}"
+                f"QPushButton:hover {{ background:#3a3a3a; }}"
+                f"QPushButton:disabled {{ color:{C_DIM}; }}"
+            )
+
+            self.weather_back_btn = QPushButton("◀ Back")
+            self.weather_fwd_btn  = QPushButton("Forward ▶")
+            self.weather_reload_btn = QPushButton("⟲ Reload")
+            self.weather_home_btn   = QPushButton("⌂ Home")
+            for b in (self.weather_back_btn, self.weather_fwd_btn,
+                      self.weather_reload_btn, self.weather_home_btn):
+                b.setStyleSheet(btn_style)
+                b.setCursor(Qt.PointingHandCursor)
+
+            self.weather_back_btn.clicked.connect(self.weather_view.back)
+            self.weather_fwd_btn.clicked.connect(self.weather_view.forward)
+            self.weather_reload_btn.clicked.connect(self.weather_view.reload)
+            self.weather_home_btn.clicked.connect(
+                lambda: self.weather_view.setUrl(QUrl(WEATHER_URL)))
+
+            self.weather_back_btn.setEnabled(False)
+            self.weather_fwd_btn.setEnabled(False)
+
+            def _update_nav_buttons(_url=None):
+                hist = self.weather_view.page().history()
+                self.weather_back_btn.setEnabled(hist.canGoBack())
+                self.weather_fwd_btn.setEnabled(hist.canGoForward())
+
+            self.weather_view.urlChanged.connect(_update_nav_buttons)
+            self.weather_view.loadFinished.connect(_update_nav_buttons)
+
+            nav_bar.addWidget(self.weather_back_btn)
+            nav_bar.addWidget(self.weather_fwd_btn)
+            nav_bar.addWidget(self.weather_reload_btn)
+            nav_bar.addWidget(self.weather_home_btn)
+            nav_bar.addStretch()
+
             ww = QWidget(); wl = QVBoxLayout(ww); wl.setContentsMargins(0, 0, 0, 0)
+            wl.setSpacing(0)
+            wl.addLayout(nav_bar)
             wl.addWidget(self.weather_view)
             chart_tabs.addTab(ww, "Weather")
+
 
         mid.addWidget(chart_tabs, 1)
         root.addLayout(mid)
 
-    def refresh(self, vict: dict):
+    def refresh(self, vict: dict, comb: dict = None):
         valid = vict.get("valid", False)
+
+        # Combined SOC bar
+        if comb is not None:
+            avg_soc = comb.get("soc_avg", 0.0)
+            self.comb_soc_bar.setValue(int(round(avg_soc * 10)))
+            self.comb_soc_bar.setFormat(f"{avg_soc:.1f}%")
+            self.comb_soc_bar.setStyleSheet(soc_bar_style(int(avg_soc)))
 
         pv_w    = vict.get("pv_w", 0.0)
         batt_v  = vict.get("batt_v", 0.0)
@@ -2058,7 +2192,7 @@ class Window(QMainWindow):
         self.overview_tab.refresh(b1, b2, combined, vict)
         self.bat1_tab.refresh(b1)
         self.bat2_tab.refresh(b2)
-        self.mppt_tab.refresh(vict)
+        self.mppt_tab.refresh(vict, combined)
 
         # Update MQTT Raw table when visible (QTableWidget = no flash)
         if self._mqtt_raw_visible():
@@ -2234,4 +2368,4 @@ if __name__ == "__main__":
     mqtt_thread = Thread(target=start_mqtt, daemon=True)
     mqtt_thread.start()
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

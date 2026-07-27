@@ -275,7 +275,7 @@ mqtt:
         {%- endfor -%}
         {%- if ns.active -%}
           {{ ns.active | join(', ') }}
-        {%- elif (value_json.battery_state | int(0, 16)) & 4 -%}
+        {%- elif (value_json.battery_state | int(0, 16) // 4) % 2 == 1 -%}
           Active (no cells)
         {%- else -%}
           None
@@ -616,7 +616,7 @@ mqtt:
         {%- endfor -%}
         {%- if ns.active -%}
           {{ ns.active | join(', ') }}
-        {%- elif (value_json.battery_state | int(0, 16)) & 4 -%}
+        {%- elif (value_json.battery_state | int(0, 16) // 4) % 2 == 1 -%}
           Active (no cells)
         {%- else -%}
           None
