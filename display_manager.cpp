@@ -9,11 +9,26 @@
 //  Bit-decode helpers for human-readable protection, balance, and state
 // ===========================================================================
 struct ProtBit { uint8_t bit; const char* abbr; };
+// LiTime BMS protection bit layout — from the original reverse-engineering
+// source: https://github.com/calledit/LiTime_BMS_bluetooth (index.html)
+//   0x00000004 = Over Charge Protection      → bit 2
+//   0x00000020 = Over-discharge Protection   → bit 5
+//   0x00000040 = Charging Over Current       → bit 6
+//   0x00000080 = Discharging Over Current    → bit 7
+//   0x00000100 = High-temp Protection (chg)  → bit 8
+//   0x00000200 = High-temp Protection (dsg)  → bit 9
+//   0x00000400 = Low-temp Protection (chg)   → bit 10
+//   0x00000800 = Low-temp Protection (dsg)   → bit 11
+//   0x00004000 = Short Circuit Protection    → bit 14
+// The chg/dsg split for the temp bits is inferred from the over-current bit
+// pattern (bit 6 = chg OC, bit 7 = dsg OC); the community doc lists both
+// high-temp and both low-temp without specifying which is charge vs discharge.
 static const ProtBit PROT_BITS[] = {
-    {0,  "CellOV"}, {1,  "CellUV"}, {2,  "PackOV"}, {3,  "PackUV"},
-    {4,  "ChgOT"},  {5,  "ChgUT"},  {6,  "DsgOT"},  {7,  "DsgUT"},
-    {8,  "ChgOC"},  {9,  "DsgOC"},  {10, "Short"},  {11, "ICErr"},
-    {12, "Lock"},
+    {2,  "OverChg"},     {5,  "OverDsg"},
+    {6,  "ChgOverCur"},  {7,  "DsgOverCur"},
+    {8,  "ChgHiTemp"},   {9,  "DsgHiTemp"},
+    {10, "ChgLoTemp"},   {11, "DsgLoTemp"},
+    {14, "ShortCkt"},
 };
 static String _decodeProt(const String& hex) {
     uint32_t v = strtoul(hex.c_str() + (hex.startsWith("0x") || hex.startsWith("0X") ? 2 : 0), nullptr, 16);
@@ -24,33 +39,45 @@ static String _decodeProt(const String& hex) {
 }
 static String _decodeBalance(const String& bin32, const String& stateHex = "") {
     // bin32 is a big-endian binary string of the 32-bit balancing register
-    // (char 0 = bit31 ... last char = bit0 = cell 1), so cell number for a
-    // given index is (length - index), not (index + 1).
+    // (BMSClient::bytesToBinaryString emits the MSB of the highest byte first).
     //
-    // The BMS also exposes a separate batteryState hex bitmask where bit 2
-    // = "Balancing" — i.e. the pack is *in* a balancing phase. The per-cell
-    // shunting register can be momentarily all-zeros between balancing pulses
-    // or while the BMS evaluates which cells to shunt, so when the state says
-    // "Balancing" but no cells are actively shunting right now we report
-    // "Active (no cells)" instead of the misleading "None".
+    // Cell numbering uses the JBD/Xiaoxiang BMS convention (from the
+    // syssi/esphome-jbd-bms ESPHome component):
+    //   bit (cells - 1 - i) → cell i+1
+    // For a 16-cell pack: bit 0 = cell 16, bit 15 = cell 1.
+    //
+    // The stateHex parameter (batteryState) is no longer used for balance
+    // detection — an earlier version checked bit 2 (0x04) as a "balancing"
+    // flag, but the community doc (calledit/LiTime_BMS_bluetooth) shows bit 2
+    // = "charge disabled", not "balancing". The per-cell shunting register is
+    // the only reliable source; when no cells are shunting we report "None".
+    (void)stateHex;  // retained for API compatibility, no longer used
+    uint32_t v = 0;
+    for (int i = 0; i < (int)bin32.length(); i++)
+        v = (v << 1) | (bin32[i] == '1' ? 1 : 0);
+    const uint8_t n_cells = 16;  // LiTime 48V 100Ah = 16S pack
     String o;
-    int len = bin32.length();
-    for (int i = 0; i < len; i++)
-        if (bin32[i] == '1') { if (o.length()) o += ' '; o += 'B'; o += String(len - i); }
-    if (o.length()) return o;
-    // No cells shunting right now — check the state bit.
-    uint16_t sv = (uint16_t)strtoul(stateHex.c_str() + (stateHex.startsWith("0x") || stateHex.startsWith("0X") ? 2 : 0), nullptr, 16);
-    return (sv & 0x04) ? "Active (no cells)" : "None";
+    for (uint8_t i = 0; i < n_cells; i++)
+        if (v & (1UL << (n_cells - 1 - i))) { if (o.length()) o += ' '; o += 'B'; o += String(i + 1); }
+    return o.length() ? o : "None";
 }
+// Battery state bit layout — from the original reverse-engineering source:
+//   https://github.com/calledit/LiTime_BMS_bluetooth (index.html)
+//   0x0000 = idle (at rest)
+//   0x0001 = charging              → bit 0
+//   0x0002 = discharging           → bit 1
+//   0x0004 = charge disabled       → bit 2
+// Note: the original source labeled 0x0002 (bit 1) as "unknown", but real BMS
+// readings show this bit is set when the battery is actively discharging.
+// This aligns the firmware decode with the Home Assistant YAML and the Python
+// dashboard, which both already treat bit 1 as "Discharging".
 static String _decodeBattState(const String& hex) {
     uint16_t v = (uint16_t)strtoul(hex.c_str() + (hex.startsWith("0x") || hex.startsWith("0X") ? 2 : 0), nullptr, 16);
     String o;
-    if (v & 1)       o += "Chg ";
-    if (v & 2)       o += "Dsg ";
-    if (v & 4)       o += "Bal ";
-    if (v & 8)       o += "Full ";
-    if (v & 0x40)    o += "Heat ";
-    if (!o.length()) o = "Idle";
+    if (v & 1)       o += "Chg ";      // 0x0001 = charging
+    if (v & 2)       o += "Dsg ";      // 0x0002 = discharging
+    if (v & 4)       o += "ChgDis ";   // 0x0004 = charge disabled
+    if (!o.length()) o = "Idle";       // 0x0000 = idle / at rest
     o.trim(); return o;
 }
 // Compute time-remaining seconds with correct direction:

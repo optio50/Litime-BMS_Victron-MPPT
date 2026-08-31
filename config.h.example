@@ -89,13 +89,12 @@
 // Time (ms) to scan for each battery at startup before giving up
 #define BLE_SCAN_TIMEOUT_MS  15000
 
-// --- BLE reconnect backoff (runtime, after initial connection is lost) -----
-// After this many consecutive failed reconnect attempts (one attempt per
-// BMS_UPDATE_MS round), stop trying for BLE_RECONNECT_COOLDOWN_MS before
-// starting a fresh round of attempts. Prevents endless rapid-fire BLE
-// connect() calls when a battery is genuinely out of range / powered off.
-#define BLE_RECONNECT_MAX_ATTEMPTS   5
-#define BLE_RECONNECT_COOLDOWN_MS    60000    // 1 minute
+// --- Component disconnect watchdog -----------------------------------------
+// If ANY component (WiFi, Battery 1 BLE, Battery 2 BLE, or MPPT BLE scan)
+// has been disconnected for longer than this, force an ESP32 reboot to
+// reset the BLE/WiFi stack and re-establish all connections.
+// 2 minutes - aggressive but ensures quick recovery from stuck connections.
+#define COMPONENT_TIMEOUT_MS  120000
 
 // --- Time-to-empty reserve threshold ----------------------------------------
 // "Time remaining" while discharging is estimated down to this % SOC, not

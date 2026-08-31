@@ -24,6 +24,9 @@ import copy
 import random
 from datetime import datetime
 from threading import Thread, Event
+from itertools import islice
+
+import numpy as np
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
@@ -32,7 +35,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QPushButton
 )
-from PyQt5 import QtGui
+from PyQt5 import QtCore, QtGui
 from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QObject, QIODevice, QByteArray
 from PyQt5.QtGui import QFont, QColor, QPalette, QPixmap
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
@@ -100,6 +103,40 @@ CHART_ROLL    = 600   # seconds of x-axis kept in view
 # 1.02**(120 * -1/8) ≈ 0.743) gives each label enough horizontal space
 # without changing the tick format.
 CHART_ROLL_SPLIT = 400
+
+# =============================================================================
+#  ─── CATEGORIZED BAR-CHART TIMING (used by MpptTab.refresh) ──────────────────
+#    BAR_PIN_S  — repaint cadence: every 30 s of buffered data the bar picture
+#                 is rebuilt (the bar's leading edge advances 30 s rightward
+#                 each repaint).
+#    BAR_TAIL_S — history behind the newest bar after a view shift (newest
+#                 sits ~1/3 from the left edge of the window).
+#    BAR_HEAD_S — room ahead of the newest bar: the window is FROZEN while
+#                 the bar marches right, and only shifts (realigns) once the
+#                 bar reaches this right edge — same "march then shift"
+#                 behaviour as the line charts (LiveAxisRange roll).
+#                 BAR_HEAD_S is thus also the shift period.
+#                 Window = TAIL + HEAD = 900 s = 15 min.
+#    All 24 h @ 1 pt/2 s (43 200 points) stay in the connector deque for
+#    pan-back / "View All" look-backs. ANY manual view change (zoom, pan,
+#    "View All") self-heals back to the proper marching window at the next
+#    30-s refresh; the corner "A" button restores it instantly.
+BAR_PIN_S  = 30
+BAR_TAIL_S = 300
+BAR_HEAD_S = 600
+# =============================================================================
+#  Line-chart view self-heal (used by _throttle_line_chart_pairs):
+#    LINE_HEAL_S — if the newest point is more than this many seconds past the
+#                  VISIBLE right edge, a roll is forced immediately. The roll
+#                  counter is APPEND-count based while the window edge is
+#                  timestamp based, so a wall-clock step (time.time() stamps)
+#                  or missed timer ticks desync them and the line can run
+#                  off-screen right for up to a full cycle. Natural march
+#                  overshoot is ~1 chart tick (2 s), so this only trips on a
+#                  genuine desync. Manual zoom/pan views are exempt (their
+#                  manual_range flag is set); the corner "A" button resumes.
+LINE_HEAL_S = 10
+# =============================================================================
 
 # =============================================================================
 #  ─── COLORS ─────────────────────────────────────────────────────────────────
@@ -297,17 +334,41 @@ def start_mqtt():
 # =============================================================================
 #  ─── BMS BIT-DECODE HELPERS ──────────────────────────────────────────────────
 # =============================================================================
-# LiTime / JK BMS protection state: 32-bit hex string (e.g. "0x00000000")
+# LiTime BMS protection state: 32-bit hex string (e.g. "0x00000000")
+# Bit layout from the original reverse-engineering source:
+#   https://github.com/calledit/LiTime_BMS_bluetooth (index.html)
+#   0x00000004 = Over Charge Protection      → bit 2
+#   0x00000020 = Over-discharge Protection   → bit 5
+#   0x00000040 = Charging Over Current       → bit 6
+#   0x00000080 = Discharging Over Current    → bit 7
+#   0x00000100 = High-temp Protection (chg)  → bit 8
+#   0x00000200 = High-temp Protection (dsg)  → bit 9
+#   0x00000400 = Low-temp Protection (chg)   → bit 10
+#   0x00000800 = Low-temp Protection (dsg)   → bit 11
+#   0x00004000 = Short Circuit Protection    → bit 14
+# The chg/dsg split for the temp bits is inferred from the over-current bit
+# pattern (bit 6 = chg OC, bit 7 = dsg OC); the community doc lists both
+# high-temp and both low-temp without specifying which is charge vs discharge.
 _PROT_BITS = [
-    (0,  "Cell OV"),  (1,  "Cell UV"),  (2,  "Pack OV"),  (3,  "Pack UV"),
-    (4,  "Chg OT"),   (5,  "Chg UT"),   (6,  "Dsg OT"),   (7,  "Dsg UT"),
-    (8,  "Chg OC"),   (9,  "Dsg OC"),   (10, "Short"),     (11, "IC Err"),
-    (12, "SW Lock"),
+    (2,  "Over Charge"),       (5,  "Over Discharge"),
+    (6,  "Chg Overcurrent"),   (7,  "Dsg Overcurrent"),
+    (8,  "Chg High Temp"),     (9,  "Dsg High Temp"),
+    (10, "Chg Low Temp"),      (11, "Dsg Low Temp"),
+    (14, "Short Circuit"),
 ]
-# Battery state: 16-bit hex string (e.g. "0x0003")
+# Battery state: 16-bit hex string (e.g. "0x0001")
+# Bit layout from the original reverse-engineering source:
+#   https://github.com/calledit/LiTime_BMS_bluetooth (index.html)
+#   0x0000 = idle (at rest)
+#   0x0001 = charging              → bit 0
+#   0x0002 = discharging           → bit 1
+#   0x0004 = charge disabled       → bit 2
+# Note: the original source labeled 0x0002 (bit 1) as "unknown", but real BMS
+# readings show this bit is set when the battery is actively discharging.
+# The Home Assistant YAML (mqtt_sensors.yaml) already decodes bit 1 as
+# "Discharging"; this aligns the Python dashboard decode with that.
 _STATE_BITS = [
-    (0, "Charging"), (1, "Discharging"), (2, "Balancing"),
-    (3, "Full"),     (6, "Heating"),
+    (0, "Charging"), (1, "Discharging"), (2, "Charge Disabled"),
 ]
 
 def decode_protection(hex_str: str) -> str:
@@ -324,50 +385,46 @@ def decode_protection(hex_str: str) -> str:
     return ", ".join(flags) if flags else "None"
 
 def decode_battery_state(hex_str: str) -> str:
-    """Return slash-separated list of active state names, or 'Idle'."""
+    """Return human-readable battery state for LiTime status register."""
     if not hex_str:
         return "Idle"
     try:
         val = int(hex_str, 16)
     except (ValueError, TypeError):
         return str(hex_str)
+    if val == 0:
+        return "Idle"
     flags = [name for bit, name in _STATE_BITS if val & (1 << bit)]
-    return " / ".join(flags) if flags else "Idle"
+    return " / ".join(flags) if flags else f"Unknown (0x{val:04X})"
 
 def decode_balance(bin_str: str, state_hex: str = "") -> str:
     """Return 'B1 B4 B8 …' for cells being balanced, or 'None'.
 
     The BMS reports the balancing register as a 32-bit value packed into a
     big-endian binary string (BMSClient::bytesToBinaryString emits the MSB
-    of the highest byte first). That means character index 0 is bit 31 and
-    the *last* character is bit 0 = cell 1, so the cell number for a given
-    string index is `len(string) - index`, NOT `index + 1`.
+    of the highest byte first).
 
-    The BMS also exposes a separate `batteryState` hex bitmask where bit 2
-    = "Balancing" — i.e. the pack is *in* a balancing phase. The per-cell
-    shunting register can be momentarily all-zeros between balancing pulses
-    or while the BMS evaluates which cells to shunt, so when the state says
-    "Balancing" but no cells are actively shunting right now we report
-    "Active (no cells)" instead of the misleading "None".
+    Cell numbering uses the JBD/Xiaoxiang BMS convention (from the
+    syssi/esphome-jbd-bms ESPHome component):
+        bit (cells - 1 - i) → cell i+1
+    For a 16-cell pack: bit 0 = cell 16, bit 15 = cell 1.
+    This is the OPPOSITE of a naive "bit 0 = cell 1" assumption.
+
+    The `state_hex` parameter (batteryState) is no longer used for balance
+    detection — an earlier version checked bit 2 (0x04) as a "balancing"
+    flag, but the community doc (calledit/LiTime_BMS_bluetooth) shows bit 2
+    = "charge disabled", not "balancing". The per-cell shunting register is
+    the only reliable source of balancing info; when no cells are shunting
+    we report "None" rather than guessing.
     """
     if not bin_str:
-        # No per-cell register — fall back to the state bit if present.
-        try:
-            sv = int(state_hex, 16) if state_hex else 0
-        except (ValueError, TypeError):
-            sv = 0
-        return "Active (no cells)" if (sv & 0x04) else "None"
-    s = str(bin_str)
-    n = len(s)
-    cells = [n - i for i, c in enumerate(s) if c == "1"]
-    if cells:
-        return " ".join(f"B{c}" for c in sorted(cells))
-    # No cells shunting right now — check the state bit.
-    try:
-        sv = int(state_hex, 16) if state_hex else 0
-    except (ValueError, TypeError):
-        sv = 0
-    return "Active (no cells)" if (sv & 0x04) else "None"
+        return "None"
+    val = int(str(bin_str), 2)
+    if val == 0:
+        return "None"
+    n_cells = 16  # LiTime 48V 100Ah = 16S pack
+    cells = [i + 1 for i in range(n_cells) if val & (1 << (n_cells - 1 - i))]
+    return " ".join(f"B{c}" for c in sorted(cells)) if cells else "None"
 
 
 # =============================================================================
@@ -562,9 +619,16 @@ def fmt_time(seconds, direction="idle") -> str:
     routinely be discharged past that point, and the BMS's voltage-based
     low-cutoff can trip before true 0% Ah is reached anyway.
 
+    Once the pack is already below the reserve (firmware reports
+    time_remaining_s = 0 with direction "to_empty"), the Overview tab
+    recomputes a time-to-0% estimate locally and passes it here with
+    direction "to_zero" so the field shows how much longer the pack can
+    keep discharging before true empty instead of going blank.
+
     Examples:
         fmt_time(20700, "to_empty")  →  "5h 45m to Reserve"
         fmt_time(8100,  "to_full")   →  "2h 15m to Full"
+        fmt_time(3600,  "to_zero")   →  "1h 00m to 0%"
         fmt_time(0,     "idle")      →  "---"
     """
     if seconds is None or int(seconds) <= 0 or direction == "idle":
@@ -575,7 +639,12 @@ def fmt_time(seconds, direction="idle") -> str:
     if h:        parts.append(f"{h}h")
     if h or m:   parts.append(f"{m:02d}m")
     if not parts: parts.append("0m")
-    suffix = "to Full" if direction == "to_full" else f"to Reserve ({SOC_RESERVE_PCT}%)"
+    if direction == "to_full":
+        suffix = "to Full"
+    elif direction == "to_zero":
+        suffix = "to 0%"
+    else:
+        suffix = f"to Reserve ({SOC_RESERVE_PCT}%)"
     return " ".join(parts) + " " + suffix
 
 def c_to_f(c):
@@ -625,6 +694,198 @@ def flow_color(flow):
 
 
 # =============================================================================
+#  ─── FastCategorizedBarPlot ──────────────────────────────────────────────────
+#  Drop-in replacement for pglive's LiveCategorizedBarPlot (ported from
+#  Multiple-Chargers/PyQT5-Multiple-Chargers.py). pglive's setData() redraws
+#  EVERY bar of the (up to 43 200-point) history on every replot with a
+#  per-point Python loop, and the replot fires every append — a sizeable
+#  event-loop freeze per chart that also stalls the 2-s chart/UI cadence
+#  (the stalls that make the update_rate caps drop whole seconds, and the
+#  mouse/crosshair feel laggy while a full day is buffered). This subclass
+#  draws the IDENTICAL picture (pixel-verified against pglive in the
+#  Chargers app, including empty bars, multi-category points, duplicate
+#  categories and deque head-rolls) from state TRANSITIONS only, vectorized
+#  with a category bitmask, and caches the masks so a normal 30-s replot
+#  encodes just the ~15 new points (a few ms). The cache validates its
+#  prefix against the new x array and falls back to a full recompute on
+#  any mismatch, clear() or new category.
+# =============================================================================
+class FastCategorizedBarPlot(LiveCategorizedBarPlot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cache = None                     # (x_array, masks_array) of last build
+        self._cat_index = {c: i for i, c in enumerate(self.categories)}
+
+    def _register(self, cats_iter):
+        for c in cats_iter:
+            if c not in self._cat_index:
+                self._cat_index[c] = len(self.categories)
+                self.categories.append(c)
+
+    def _encode(self, y_seq, n):
+        # y_seq may be an ndarray (uniform point lengths, incl. 2-D when every
+        # point holds one category) or the deque/list pglive emits when any
+        # entry is [] (inhomogeneous -> np.asarray raises inside pglive).
+        cache = {}
+        ci = self._cat_index
+
+        def mask_of(t):
+            m = 0
+            for c in t:
+                m |= 1 << ci[c]               # OR: a duplicated category in one
+            return m                           # point must not add its bit twice
+
+        return np.fromiter((cache.setdefault(t, mask_of(t))
+                            for t in (tuple(v) for v in y_seq)),
+                           dtype=np.int64, count=n)
+    def setData(self, x_data, y_data, **kwargs):
+        self.x_data = x_data
+        self.y_data = y_data
+        if len(x_data) != len(y_data):
+            raise Exception("Len of x_data must be the same as y_data")
+        n = len(x_data)
+        self.picture = QtGui.QPicture()
+        p = QtGui.QPainter(self.picture)
+        p.setPen(self.outline_pen)
+        if n:
+            xb = np.asarray(x_data, dtype=np.float64)
+            # --- incremental masks: reuse the cached prefix when x still aligns ---
+            masks = None
+            if self._cache is not None and n >= 2:
+                cx, cm = self._cache
+                pos = int(np.searchsorted(xb, cx[-1]))
+                if pos < n and xb[pos] == cx[-1]:
+                    drop = len(cx) - 1 - pos    # head elements rolled off the deque
+                    if drop >= 0 and np.array_equal(xb[:pos + 1], cx[drop:]):
+                        new_n = n - 1 - pos
+                        if new_n:
+                            y_tail = list(islice(y_data, pos + 1, n))
+                            self._register(c for t in y_tail for c in t)
+                            masks = np.concatenate([cm[drop:], self._encode(y_tail, new_n)])
+                        else:
+                            masks = cm[drop:]
+            if masks is None:                   # first call / clear() / mismatch
+                self._register(c for t in y_data for c in t)
+                masks = self._encode(y_data, n)
+            self._cache = (xb, masks)
+            # --- draw only start -> end transitions ---
+            prev = np.zeros(n, dtype=np.int64)
+            prev[1:] = masks[:-1]
+            starts = masks & ~prev
+            ends = ~masks & prev
+            active = {}
+            for i in np.nonzero(starts | ends)[0].tolist():
+                xi = float(xb[i])
+                e = int(ends[i])
+                while e:                        # close bars that end here
+                    b = e & -e
+                    e ^= b
+                    s = active.pop(b, xi)
+                    p.setBrush(self.category_color.get(self.categories[b.bit_length() - 1],
+                                                       self.bar_brush))
+                    p.drawRect(QtCore.QRectF(s, b.bit_length() - 1 - self.bar_height / 2,
+                                             xi - s, self.bar_height))
+                st = int(starts[i])
+                while st:                       # open bars that start here
+                    b = st & -st
+                    st ^= b
+                    active[b] = xi
+            for b in active:                    # still-open bars run to the newest x
+                p.setBrush(self.category_color.get(self.categories[b.bit_length() - 1],
+                                                   self.bar_brush))
+                p.drawRect(QtCore.QRectF(active[b], b.bit_length() - 1 - self.bar_height / 2,
+                                         float(xb[-1]) - active[b], self.bar_height))
+        else:
+            self._cache = None
+        p.end()
+        self.prepareGeometryChange()
+        self.informViewBoundsChanged()
+        self.bounds = [None, None]
+        self.sigPlotChanged.emit(self)
+
+    def clear(self):
+        self._cache = None
+        self._cat_index = {c: i for i, c in enumerate(self.categories)}
+        super().clear()
+
+
+# =============================================================================
+#  ─── HIDDEN-CHART RENDER THROTTLING (ported from the Chargers app) ───────────
+#  pglive re-plots EVERY connector's full deque on every plotted append
+#  (setData of up to 43 200 points), even for charts on tabs that are not
+#  visible and never paint — tens of milliseconds of event-loop stall per
+#  tick across this app's ~50 line connectors (only a handful on the
+#  visible tab at any time), which is what makes the mouse, crosshair and
+#  the whole app feel laggy once a full day is buffered. Only the DATA needs
+#  recording every tick, so hidden widgets' connectors get a huge
+#  plot_timeout; the deque appends in the refresh() methods stay
+#  unconditional, so NO data is ever lost. A hidden -> visible transition
+#  re-plots the buffered history immediately and re-aligns rolling_index
+#  (see _catch_up_connector below). Each tab calls its throttle at the top
+#  of refresh() (the 2-s self-healing safety net, also covering minimize /
+#  restore) and hooks its tab widgets' currentChanged for an instant
+#  refresh on tab clicks.
+# =============================================================================
+def _throttle_line_chart_pairs(pairs):
+    """Render only the visible charts; `pairs` is a list of
+    (LivePlotWidget, [DataConnector, ...]) tuples."""
+    for widget, conns in pairs:
+        visible = widget.isVisible()
+        if visible:
+            for conn in conns:
+                if conn.plot_timeout:
+                    # Hidden -> visible transition: restore live plotting
+                    # and re-plot the buffered history right now.
+                    conn.plot_timeout = 0.0
+                    _catch_up_connector(conn)
+            # Overshoot self-heal (steady state only — see LINE_HEAL_S): if
+            # the newest point has run past the visible right edge by more
+            # than LINE_HEAL_S (clock step / missed ticks desyncing the
+            # append-count roll counter from the timestamp-anchored window),
+            # force a roll NOW instead of letting the line sit off-screen
+            # until the counter catches up. Manual views are exempt; skipped
+            # while < roll_on_tick points are buffered so the normal
+            # first-cycle startup window is untouched.
+            roll = widget.x_range_controller.roll_on_tick
+            if (not widget.manual_range and roll
+                    and len(conns[0].x) > roll):
+                edge = widget.getViewBox().viewRange()[0][1]
+                if conns[0].x[-1] - edge > LINE_HEAL_S:
+                    for conn in conns:
+                        _catch_up_connector(conn)
+        else:
+            for conn in conns:
+                conn.plot_timeout = 3600.0             # effectively stop re-plotting
+                conn.last_plot = time.perf_counter()   # keep the deferral rolling
+
+
+def _catch_up_connector(conn):
+    """Immediate catch-up for a connector whose chart just became visible:
+    re-plot the current deque NOW and re-align rolling_index to a roll
+    boundary so pglive's LiveAxisRange recomputes the marching window on
+    this very roll tick. rolling_index only advances on PLOTTED appends,
+    so it froze while the chart was hidden — at 0 for a chart hidden since
+    app start. Emitting that frozen tick 0 would make pglive compute a
+    degenerate single-point [x0, x0] window (visible for up to a full
+    cycle), so a below-first-boundary index is bumped to roll_on_tick.
+    Emits exactly what a plotted append emits — WITHOUT appending a data
+    point."""
+    if not len(conn.x):
+        return
+    widget = conn.plot.plot_widget
+    roll = widget.x_range_controller.roll_on_tick
+    if roll:
+        if conn.rolling_index < roll:
+            # Never plotted (hidden since app start, or still in the first
+            # cycle): start at the first roll boundary, not tick 0.
+            conn.rolling_index = roll
+        elif conn.rolling_index % roll:
+            conn.rolling_index += roll - (conn.rolling_index % roll)
+    conn.last_plot = time.perf_counter() - 3600.0     # force past plot_timeout
+    conn._update_data()                               # full-deque setData
+    conn.sig_data_roll_tick.emit(conn, conn.rolling_index)
+
+# =============================================================================
 #  ─── LIVE CHART FACTORY ──────────────────────────────────────────────────────
 # =============================================================================
 CHART_KW = {
@@ -654,27 +915,25 @@ def make_chart(title: str, y_label: str = "", roll: int = CHART_ROLL,
 def make_connector(plot, max_points: int = CHART_MAX_PTS) -> DataConnector:
     return DataConnector(plot, max_points=max_points, update_rate=2)
 
-def make_category_chart(title: str, categories: list, roll: int = CHART_ROLL) -> LivePlotWidget:
+def make_category_chart(title: str, categories: list) -> LivePlotWidget:
     """Chart with a datetime bottom axis and a categorical (named) left axis,
-    used for the MPPT charger-state bar chart."""
+    used for the MPPT charger-state bar chart.
+
+    Deliberately NO x_range_controller (pglive's LiveAxisRange): the state
+    chart's connector is ignore_auto_range=True and its view is driven
+    manually by MpptTab.refresh()'s data-time "march then shift" clocks
+    (see the BAR_* constants) — exactly like the Chargers app's bar
+    charts. pglive's rolling window would fight those re-pins."""
     bottom = LiveAxis("bottom", **{Axis.TICK_FORMAT: Axis.DATETIME})
     left   = LiveAxis("left",   **{Axis.TICK_FORMAT: Axis.CATEGORY, Axis.CATEGORIES: categories})
     w = LivePlotWidget(
         title=title,
         axisItems={"bottom": bottom, "left": left},
-        x_range_controller=LiveAxisRange(roll_on_tick=roll, offset_left=0.5),
         **CHART_KW,
     )
-    w.x_range_controller.crop_left_offset_to_data = True
     w.showGrid(x=True, y=True, alpha=0.3)
     w.setBackground("#000000")
     return w
-
-
-def _auto_fill_brush(color):
-    """Create an auto brush from a color for filled charts."""
-    c = QColor(color)
-    return (c.red(), c.green(), c.blue(), 200)
 
 
 # =============================================================================
@@ -836,8 +1095,11 @@ class BatteryPanel(QWidget):
         name = BAT_NAME[self.bat_id]
 
         # ── Tab 1: Power ──────────────────────────────────────────────────
-        p_plot = LiveLinePlot(pen=pg.mkPen(C_ORANGERED, width=1.5), name="Power",
-                              fillLevel=0, brush=(255, 69, 0, 50))
+        # Plain line, NO fillLevel/brush area fill: pyqtgraph renders an
+        # alpha-blended area fill in 50-point chunks (~860 fillPath calls
+        # across a full 24 h @ 1 pt/2 s), which makes a "View All" repaint
+        # freeze the UI for many seconds. Plain lines repaint in ~ms.
+        p_plot = LiveLinePlot(pen=pg.mkPen(C_ORANGERED, width=1.5), name="Power")
         self.p_connector = make_connector(p_plot)
         self.p_chart     = make_chart(f"{name} – Power (24 hrs)", y_label="Watts")
         self.p_chart.addItem(p_plot)
@@ -885,8 +1147,8 @@ class BatteryPanel(QWidget):
         chart_tabs.addTab(dw, "Cell Δ")
 
         # ── Tab 6: Ah Remaining ───────────────────────────────────────────
-        ah_plot = LiveLinePlot(pen=pg.mkPen(C_CYAN, width=1.5), name=f"{name} Remaining Ah",
-                               fillLevel=0, brush=(88, 214, 238, 40))
+        # Plain line, NO fillLevel/brush area fill (see the Tab 1 note).
+        ah_plot = LiveLinePlot(pen=pg.mkPen(C_CYAN, width=1.5), name=f"{name} Remaining Ah")
         self.ah_connector = make_connector(ah_plot)
         self.ah_chart     = make_chart(f"{name} – Remaining Capacity (24 hrs)", y_label="Ah")
         self.ah_chart.addItem(ah_plot)
@@ -927,11 +1189,55 @@ class BatteryPanel(QWidget):
         cvl.addWidget(self.cellv_chart)
         chart_tabs.addTab(cvw, "Cell Voltages")
 
+        # ── Render performance (ported from the Chargers app) ─────────────
+        # Full-history "View All" views (all 24 h @ 1 pt/2 s = 43 200 points
+        # stay buffered in each connector deque for pan-back) are drawn with
+        # pyqtgraph min/max "peak" downsampling — roughly one min/max pair
+        # per 5 screen pixels, so spikes are preserved and zooming back in
+        # restores full resolution automatically. In the normal marching
+        # window no downsampling kicks in (ds = 1) and behavior is identical
+        # to before; only wide views get the per-curve repaint speedup.
+        # NOTES: this must be the PlotItem-level call made AFTER addItem (a
+        # per-curve setDownsampling is overwritten by addItem), and
+        # setClipToView is deliberately NOT used — pglive's LiveAxisRange
+        # steers the marching window from plot.getData() (the display
+        # dataset) every tick, so feeding the visible range back into the
+        # display data would couple the view into that computation.
+        for _w in (self.p_chart, self.vi_chart, self.temp_chart,
+                   self.delta_chart, self.ah_chart, self.cellv_chart):
+            _w.getPlotItem().setDownsampling(auto=True, mode='peak')
+
+        # Hidden-chart render throttling (see the module-level note above the
+        # _throttle_line_chart_pairs helper): only the DATA needs recording
+        # every tick; hidden charts stop re-plotting their full deque and a
+        # hidden -> visible transition catches up instantly.
+        self._line_chart_pairs = [
+            (self.p_chart,    [self.p_connector]),
+            (self.vi_chart,   [self.v_connector, self.i_connector]),
+            (self.temp_chart, [self.ct_connector, self.mt_connector]),
+            (self.delta_chart,[self.d_connector]),
+            (self.ah_chart,   [self.ah_connector]),
+            (self.cellv_chart, self.cellv_connectors),
+        ]
+        # Instant refresh on inner-chart-tab click (fires after the new page
+        # is shown); the per-tick call in refresh() is the self-healing
+        # safety net (startup, minimize/restore, top-level tab switches).
+        chart_tabs.currentChanged.connect(lambda *_: self._throttle_hidden_line_charts())
+
         mid.addWidget(chart_tabs, 1)
         root.addLayout(mid, 1)
 
     # ─────────────────────────────────────────────────────────────────────────
+    def _throttle_hidden_line_charts(self):
+        """Render only this panel's visible charts (see the _build_ui note)."""
+        _throttle_line_chart_pairs(self._line_chart_pairs)
+
+    # ─────────────────────────────────────────────────────────────────────────
     def refresh(self, d: dict):
+        # Render only the visible charts first; the appends below stay
+        # unconditional, so no data is ever lost and a chart that just
+        # became visible catches up immediately.
+        self._throttle_hidden_line_charts()
         ts = time.time()
 
         # SOC bar
@@ -1024,6 +1330,18 @@ class BatteryPanel(QWidget):
 # =============================================================================
 #  ─── OVERVIEW TAB ────────────────────────────────────────────────────────────
 # =============================================================================
+class ClickableLabel(QLabel):
+    """QLabel that emits a `clicked` signal on left-button release.
+    Used for the Overview tab's app icon, which acts as a shortcut to the
+    MPPT tab's Weather forecast sub-tab (see Window's hookup)."""
+    clicked = pyqtSignal()
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(ev)
+
+
 class OverviewTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -1070,7 +1388,9 @@ class OverviewTab(QWidget):
         top_row.addWidget(vcenter(self.mppt_led))
 
         # App icon/logo — the divider between left and right sides
-        self.logo_lbl = QLabel()
+        # Clickable: jumps to the MPPT tab's Weather forecast sub-tab.
+        self.logo_lbl = ClickableLabel()
+        self.logo_lbl.setCursor(Qt.PointingHandCursor)
         _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.jpg")
         _pix = QPixmap(_icon_path)
         if not _pix.isNull():
@@ -1252,6 +1572,11 @@ class OverviewTab(QWidget):
 
         pwr_plot = LiveLinePlot(pen=pg.mkPen(C_ORANGERED, width=2), name="Total Power",
                                 fillLevel=0, brush=(255, 69, 0, 50))
+        # NOTE: this is the ONE chart that keeps its area fill (owner's
+        # preference). The peak downsampling below shrinks the fill's
+        # 50-point-chunk draw calls proportionally on wide views, so it is
+        # far cheaper than an unsampled fill — just not as fast as a plain
+        # line if you ever zoom out to a full 24 h.
         self.pwr_connector = make_connector(pwr_plot)
         cur_plot = LiveLinePlot(pen=pg.mkPen(C_GREEN, width=2), name="Total Current")
         self.cur_connector = make_connector(cur_plot)
@@ -1267,8 +1592,10 @@ class OverviewTab(QWidget):
         soc_l.addWidget(self.soc_chart)
         left_tabs.addTab(soc_w, "SOC")
 
-        wh_plot = LiveLinePlot(pen=pg.mkPen(C_BLUE, width=1.5), name="Wh Remaining",
-                               fillLevel=0, brush=(0, 0, 108, 200))
+        # Plain line, NO fillLevel/brush area fill (see the BatteryPanel
+        # Tab-1 note): an alpha-blended fill in 50-point chunks freezes the
+        # UI for many seconds on a full-history "View All" repaint.
+        wh_plot = LiveLinePlot(pen=pg.mkPen(C_BLUE, width=1.5), name="Wh Remaining")
         self.wh_rem_connector = make_connector(wh_plot)
         self.wh_rem_chart = make_chart("Wh Remaining – 24 Hours", y_label="kWh", roll=CHART_ROLL_SPLIT)
         self.wh_rem_chart.addItem(wh_plot)
@@ -1291,8 +1618,38 @@ class OverviewTab(QWidget):
         charts_split.addWidget(right_w)
         root.addWidget(charts_split, 1)
 
+        # ── Render performance (ported from the Chargers app) ─────────────
+        # PlotItem-level peak downsampling, applied AFTER addItem (see the
+        # full note in BatteryPanel._build_ui).
+        for _w in (self.soc_chart, self.wh_rem_chart, self.pwr_chart):
+            _w.getPlotItem().setDownsampling(auto=True, mode='peak')
+
+        # Hidden-chart render throttling (see the module-level note above the
+        # _throttle_line_chart_pairs helper). All three charts also go dark
+        # when the whole Overview tab is hidden behind another top-level tab
+        # — the per-tick call in refresh() self-heals that within 2 s, and
+        # Window's top-level tabs.currentChanged hookup makes the
+        # transition instant.
+        self._line_chart_pairs = [
+            (self.soc_chart,    [self.soc1_connector, self.soc2_connector,
+                                 self.socavg_connector]),
+            (self.wh_rem_chart, [self.wh_rem_connector]),
+            (self.pwr_chart,    [self.pwr_connector, self.cur_connector]),
+        ]
+        # Instant refresh on the SOC <-> Wh Remaining sub-tab click.
+        left_tabs.currentChanged.connect(lambda *_: self._throttle_hidden_line_charts())
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def _throttle_hidden_line_charts(self):
+        """Render only this tab's visible charts (see the __init__ note)."""
+        _throttle_line_chart_pairs(self._line_chart_pairs)
+
     # ─────────────────────────────────────────────────────────────────────────
     def refresh(self, b1d, b2d, comb, vict):
+        # Render only the visible charts first; the appends below stay
+        # unconditional, so no data is ever lost and a chart that just
+        # became visible catches up immediately.
+        self._throttle_hidden_line_charts()
         ts      = time.time()
         now_str = datetime.now().strftime("%H:%M:%S")
         self.ts_lbl.setText(f"Updated: {now_str}")
@@ -1361,6 +1718,15 @@ class OverviewTab(QWidget):
         trs  = comb.get("time_remaining_s",   0)
         tdir = comb.get("time_direction",     "idle")
         flow = comb.get("flow",               "idle")
+
+        # Once the pack has discharged past the reserve threshold the firmware
+        # reports time_remaining_s = 0 with direction "to_empty", which would
+        # make fmt_time() show "---" even though the battery is still draining.
+        # Recompute a time-to-0% estimate from the remaining Ah and current so
+        # the field keeps counting down to true empty instead of going blank.
+        if tdir == "to_empty" and int(trs) <= 0 and tp < -1.0 and abs(tc) > 0.2 and tr > 0.0:
+            trs  = int((tr / abs(tc)) * 3600.0)
+            tdir = "to_zero"
 
         self.avg_soc.setText(f"{avg_soc:.1f}%")
         p_col = C_GREEN if tp >= 1 else (C_ORANGE if tp <= -1 else C_DIM)
@@ -1566,40 +1932,80 @@ class MpptTab(QWidget):
 
         chart_tabs = QTabWidget()
         chart_tabs.setDocumentMode(True)
+        self.chart_tabs = chart_tabs  # kept for show_weather() (icon shortcut)
 
-        def add_chart_tab(title, y_label, color=C_YELLOW, fill=False, brush=None):
-            if fill:
-                kw = {"fillLevel": 0, "brush": brush if brush is not None else _auto_fill_brush(color)}
-            else:
-                kw = {}
-            plot = LiveLinePlot(pen=pg.mkPen(color, width=1.5), name=title, **kw)
+        # One (chart, connector) pair per line-chart tab, collected for the
+        # peak-downsampling pass and the hidden-chart throttle pairs below.
+        self._mppt_charts = []
+
+        def add_chart_tab(title, y_label, color=C_YELLOW):
+            # Plain line, NO fillLevel/brush area fill (see the BatteryPanel
+            # Tab-1 note): an alpha-blended fill in 50-point chunks freezes
+            # the UI for many seconds on a full-history "View All" repaint.
+            plot = LiveLinePlot(pen=pg.mkPen(color, width=1.5), name=title)
             conn  = make_connector(plot)
             chart = make_chart(f"{title} – 24 hrs", y_label=y_label)
             chart.addItem(plot)
+            self._mppt_charts.append((chart, conn))
             w = QWidget()
             l = QVBoxLayout(w); l.setContentsMargins(0, 0, 0, 0)
             l.addWidget(chart)
             chart_tabs.addTab(w, title)
             return conn
 
-        self.c_pv_w   = add_chart_tab("PV Power",       "Watts", C_BLUE, fill=True, brush=(0, 0, 108, 200))
+        self.c_pv_w   = add_chart_tab("PV Power",       "Watts", C_BLUE)
         self.c_batt_v = add_chart_tab("Battery Voltage", "V",     C_GREEN)
         self.c_batt_a = add_chart_tab("Battery Current", "A",     C_ORANGE)
         self.c_yield  = add_chart_tab("Yield Today",     "kWh",   C_MAGENTA)
 
-        # ── Charger State — categorized bar chart (pglive-style) ───────────
-
-        self.state_plot = LiveCategorizedBarPlot(
+        # ── Charger State — categorized bar chart ─────────────────────────
+        # FastCategorizedBarPlot: drop-in replacement for pglive's
+        # LiveCategorizedBarPlot (see the class note above) — full-day
+        # history repaints encode only the new points instead of
+        # re-drawing every bar with a per-point Python loop.
+        self.state_plot = FastCategorizedBarPlot(
             MPPT_STATE_CATEGORIES,
             category_color=MPPT_STATE_COLORS,
             bar_height=0.9,
         )
-        self.state_connector = make_connector(self.state_plot)
+        # Fixed cadence: 1 point / 2-s UI tick, NO update_rate cap: any cap
+        # silently drops ticks that fire back-to-back after an event-loop
+        # stall, losing whole seconds — and with them any state event
+        # shorter than the stall. plot_rate=1/30 is only a repaint backstop;
+        # refresh() forces the real repaint at each 30-s repaint step.
+        self.state_connector = DataConnector(self.state_plot, max_points=CHART_MAX_PTS,
+                                             plot_rate=1/30, ignore_auto_range=True)
         self.state_chart = make_category_chart("Charger State – 24 hrs", MPPT_STATE_CATEGORIES)
         self.state_chart.addItem(self.state_plot)
+        # Fixed y-range: pglive autoranging is off for this chart
+        # (ignore_auto_range=True on the connector).
+        self.state_chart.setYRange(-1, len(MPPT_STATE_CATEGORIES))
         sw = QWidget(); sl = QVBoxLayout(sw); sl.setContentsMargins(0, 0, 0, 0)
         sl.addWidget(self.state_chart)
         chart_tabs.addTab(sw, "Charger State")
+
+        # Bar-chart view clocks (data-time driven, so UI-timer jitter can
+        # never skip or double a step):
+        #   _bar_paint_last — data-time of the last 30-s repaint
+        #   _bar_view_right — right edge of the frozen window; the view
+        #                     shifts only when the bar reaches it
+        self._bar_paint_last = None
+        self._bar_view_right = {}
+
+        # Bar-chart corner "A" button: instantly restore the proper marching
+        # window (newest bar ~1/3 from the left, fresh room on the right) —
+        # replaces pglive's default handler, which replays a range that is
+        # never refreshed for ignore_auto_range connectors. User zoom/pan
+        # (sigRangeChangedManually — emitted by wheel, drag and rect-zoom,
+        # but NEVER by our own programmatic setXRange re-pins) schedules
+        # the same restore for the next 30-s refresh
+        # (see _bar_manual_view_changed).
+        self.state_chart.getPlotItem().autoBtn.clicked.disconnect()
+        self.state_chart.getPlotItem().autoBtn.clicked.connect(
+            lambda *_, c=self.state_connector, w=self.state_chart, n=len(MPPT_STATE_CATEGORIES):
+                self._bar_autorange(c, w, n))
+        self.state_chart.getPlotItem().vb.sigRangeChangedManually.connect(
+            lambda *_, w=self.state_chart: self._bar_manual_view_changed(w))
 
         # ── Weather forecast browser ──────────────────────────────────────
         # A small nav toolbar (Back / Forward / Reload / Home) is added above
@@ -1608,6 +2014,7 @@ class MpptTab(QWidget):
         # page loads, so Chromium's history often has nothing to go "back"
         # to and the right-click context-menu "Back" entry appears to do
         # nothing. These buttons give a reliable way to navigate regardless.
+        self.weather_tab_index = None
         if WEATHER_URL:
             self.weather_view = QWebEngineView()
             self.weather_view.setPage(_QuietWebPage(self.weather_view))
@@ -1661,13 +2068,51 @@ class MpptTab(QWidget):
             wl.addLayout(nav_bar)
             wl.addWidget(self.weather_view)
             chart_tabs.addTab(ww, "Weather")
+            self.weather_tab_index = chart_tabs.count() - 1
 
+
+        # ── Render performance (ported from the Chargers app) ─────────────
+        # PlotItem-level peak downsampling for the MPPT line charts, applied
+        # AFTER addItem (see the full note in BatteryPanel._build_ui). The
+        # state bar chart is not a PlotDataItem and already repaints on the
+        # throttled 30-s clock, so it is excluded.
+        for _chart, _conn in self._mppt_charts:
+            _chart.getPlotItem().setDownsampling(auto=True, mode='peak')
+
+        # Hidden-chart render throttling (see the module-level note above
+        # the _throttle_line_chart_pairs helper). The state bar chart is
+        # excluded: with FastCategorizedBarPlot its forced 30-s repaints are
+        # a few ms of incremental work even when hidden, and its view is
+        # driven by the data-time march clocks in refresh(), not by pglive's
+        # roll machinery.
+        self._line_chart_pairs = [(chart, [conn]) for chart, conn in self._mppt_charts]
+        # Instant refresh on inner-chart-tab click; the per-tick call in
+        # refresh() is the self-healing safety net.
+        chart_tabs.currentChanged.connect(lambda *_: self._throttle_hidden_line_charts())
 
         mid.addWidget(chart_tabs, 1)
         root.addLayout(mid)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    def _throttle_hidden_line_charts(self):
+        """Render only this tab's visible line charts (see the __init__ note)."""
+        _throttle_line_chart_pairs(self._line_chart_pairs)
+
+    def show_weather(self):
+        """Select the inner Weather forecast sub-tab (no-op when WEATHER_URL
+        is unset and the sub-tab was never added). Invoked by the Window
+        when the Overview tab's app icon is clicked."""
+        if self.weather_tab_index is not None:
+            self.chart_tabs.setCurrentIndex(self.weather_tab_index)
+
+    # ─────────────────────────────────────────────────────────────────────────
     def refresh(self, vict: dict, comb: dict = None):
         valid = vict.get("valid", False)
+
+        # Render only this tab's visible charts; the appends below stay
+        # unconditional, so no data is ever lost and a chart that just
+        # became visible catches up immediately.
+        self._throttle_hidden_line_charts()
 
         # Combined SOC bar
         if comb is not None:
@@ -1707,16 +2152,95 @@ class MpptTab(QWidget):
             self.age_val.setText("—")
             self.age_val.setStyleSheet(f"color:{C_DIM}; font-size:13px; font-weight:bold;")
 
-        if not valid:
-            return
+        # ---- Fixed-cadence chart appends (Chargers-style): one point per
+        # 2-s UI tick no matter what, so max_points maps EXACTLY to wall
+        # time (43 200 pts @ 2 s = precisely 24 hours). An invalid/missing
+        # MPPT reading appends 0.0 — an honest flat line instead of a
+        # misleading interpolation across the gap — and an EMPTY list to
+        # the state bar chart, which closes any open bar so a stale state
+        # can't falsely bridge the outage, while the 24-h dequeue, the 30-s
+        # repaints and the view clocks all stay alive.
         ts = time.time()
         self.c_pv_w.cb_append_data_point(  float(pv_w),   ts)
         self.c_batt_v.cb_append_data_point(float(batt_v), ts)
         self.c_batt_a.cb_append_data_point(float(batt_a), ts)
         self.c_yield.cb_append_data_point( float(yld),    ts)
 
-        self.state_connector.cb_append_data_point([state_s], ts)
+        # ---- Bar-chart view control: repaint every 30 s; shift only when
+        # the bar reaches the right edge (march behaviour like the line
+        # charts' LiveAxisRange roll). The window is FROZEN between shifts:
+        # the bar's leading edge marches right 30 s per repaint across the
+        # BAR_HEAD_S of room, and only when it reaches the right edge does
+        # the view shift forward — newest bar back to ~1/3 from the left.
+        # Both clocks are data-time driven (not wall-clock modulo), so
+        # UI-timer jitter can never skip or double a step, and both run
+        # BEFORE this tick's append so the forced repaint lands on this
+        # very append. ANY manual view change (zoom, pan, "View All")
+        # self-heals back to the proper marching window at the next 30-s
+        # refresh, and the corner "A" button restores it instantly; the
+        # full 24 h @ 2 s/pt stays in the connector deque for pan-back and
+        # look-backs.
+        conn = self.state_connector
+        if self._bar_paint_last is None or (ts - self._bar_paint_last) >= BAR_PIN_S:
+            self._bar_paint_last = ts
+            # Age last_plot so this tick's append repaints the picture
+            # (exactly one repaint per 30-s step, the leading edge
+            # advancing 30 s rightward each time).
+            conn.last_plot = time.perf_counter() - 3600.0
+            # Stale-view self-heal: if this chart's VISIBLE right edge is
+            # behind the newest buffered point (right-click "View All" or
+            # a zoom the bar has outrun — neither is reported through
+            # sigRangeChangedManually), the bar end is off-screen. Expire
+            # the frozen window NOW so the shift block below restores the
+            # proper view on this very 30-s refresh.
+            if len(conn.x) and self.state_chart.getViewBox().viewRange()[0][1] < conn.x[-1]:
+                self._bar_view_right[self.state_chart] = ts
 
+        right = self._bar_view_right.get(self.state_chart)
+        if right is None or ts >= right:
+            # Frozen window expired (or first tick): shift forward. Left
+            # clamps to the oldest buffered point until BAR_TAIL_S of
+            # history exists, so the trace STARTS at the LEFT edge and
+            # marches right.
+            left = max(conn.x[0], ts - BAR_TAIL_S) if len(conn.x) else ts
+            self.state_chart.setXRange(left, ts + BAR_HEAD_S, padding=0)
+            # Correct the y-range (authoritative category count)
+            self.state_chart.setYRange(-1, len(MPPT_STATE_CATEGORIES))
+            self._bar_view_right[self.state_chart] = ts + BAR_HEAD_S
+            # Repaint together with the shift
+            conn.last_plot = time.perf_counter() - 3600.0
+
+        # NEVER append the "—" placeholder as a category: an invalid reading
+        # gets an empty list, which closes any open bar.
+        self.state_connector.cb_append_data_point([state_s] if valid else [], ts)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def _bar_autorange(self, conn, widget, n_cats):
+        """Corner "A" button for the categorized bar chart: instantly
+        restore the proper marching window — newest bar ~1/3 from the left
+        edge, BAR_HEAD_S of fresh room on the right — exactly like the line
+        charts' auto button resuming the live roll. Replaces pglive's
+        default handler, which replays a range that is never refreshed for
+        ignore_auto_range connectors. Full-history look-back remains
+        available via pan or right-click "View All" (both self-heal back to
+        the marching window at the next 30-s refresh)."""
+        if len(conn.x):
+            newest = conn.x[-1]
+            left = max(conn.x[0], newest - BAR_TAIL_S)
+            widget.setXRange(left, newest + BAR_HEAD_S, padding=0)
+            self._bar_view_right[widget] = newest + BAR_HEAD_S
+        widget.setYRange(-1, n_cats)
+
+    def _bar_manual_view_changed(self, widget):
+        """User zoom/pan/rect-zoom on the bar chart (sigRangeChangedManually
+        — never emitted by our own programmatic setXRange re-pins): schedule
+        the proper marching window to be restored at the NEXT 30-s refresh
+        by shortening this chart's frozen right edge to the upcoming repaint
+        step, where the regular shift logic re-pins the view."""
+        new_edge = (self._bar_paint_last + BAR_PIN_S) if self._bar_paint_last is not None else time.time()
+        edge = self._bar_view_right.get(widget)
+        if edge is None or new_edge < edge:
+            self._bar_view_right[widget] = new_edge
 
 
 # =============================================================================
@@ -1881,6 +2405,26 @@ class Window(QMainWindow):
         self.tabs.addTab(self.mppt_tab,      "MPPT")
         self.tabs.addTab(self.log_container, "Log")
 
+        # Instant catch-up on top-level tab switches (ported from the
+        # Chargers app's tabWidget.currentChanged hookup): re-plot the
+        # buffered history of the newly visible tab's charts right away
+        # instead of at the next 2-s refresh tick. The per-tick throttle call
+        # at the top of each tab's refresh() is the self-healing safety net
+        # (startup, minimize/restore); this makes the transition instant.
+        self.tabs.currentChanged.connect(lambda *_: (
+            self.overview_tab._throttle_hidden_line_charts(),
+            self.bat1_tab._throttle_hidden_line_charts(),
+            self.bat2_tab._throttle_hidden_line_charts(),
+            self.mppt_tab._throttle_hidden_line_charts(),
+        ))
+
+        # Clicking the app icon on the Overview tab jumps straight to the
+        # MPPT tab's Weather forecast sub-tab (switch the top-level tab
+        # first, then select the inner sub-tab).
+        self.overview_tab.logo_lbl.clicked.connect(
+            lambda: (self.tabs.setCurrentWidget(self.mppt_tab),
+                     self.mppt_tab.show_weather()))
+
         # Status bar
         self.status_mqtt = QLabel("MQTT: connecting…")
         self.status_mqtt.setStyleSheet(f"color:{C_DIM}; padding:0 8px;")
@@ -1923,6 +2467,7 @@ class Window(QMainWindow):
         _none = {"connected": None, "flow": None,
                  "flow_pending": None, "flow_pending_t": 0.0,
                  "soc": None, "ble_retry_paused": None,
+                 "ble_disconnect_s": 0,
                  "protection": None, "balancing": None,
                  "cell_delta_mv": None, "cell_temp_f": None, "mosfet_temp_f": None}
         self._prev = {1: copy.copy(_none), 2: copy.copy(_none)}
@@ -1978,16 +2523,19 @@ class Window(QMainWindow):
                       C_GREEN if conn else C_RED)
         prev["connected"] = conn
 
-        # BLE reconnect backoff: ESP32 gives up after N failed attempts and
-        # pauses BLE_RECONNECT_COOLDOWN_MS before trying again. Log only the
-        # edge into/out of that pause, not every attempt.
-        paused = bool(data.get("ble_retry_paused", False))
-        if prev["ble_retry_paused"] is not None and paused != prev["ble_retry_paused"]:
-            if paused:
-                self._log(f"{name}: BLE reconnect attempts exhausted, pausing before next round", C_ORANGE)
-            else:
-                self._log(f"{name}: BLE reconnect round resuming", C_DIM)
-        prev["ble_retry_paused"] = paused
+        # BLE disconnect tracking: the firmware now tries to reconnect every
+        # BMS_UPDATE_MS tick (no more round/cooldown cycle). Log a periodic
+        # "still disconnected" reminder every 30s instead of every state change.
+        ble_disc_s = int(data.get("ble_disconnect_s", 0) or 0)
+        prev["ble_retry_paused"] = bool(data.get("ble_retry_paused", False))
+        if not conn and ble_disc_s > 0:
+            # Log at 0s (first detection), then every 30s
+            if prev["ble_disconnect_s"] == 0 or ble_disc_s - prev["ble_disconnect_s"] >= 30:
+                self._log(f"{name}: BLE still disconnected ({ble_disc_s}s, "
+                          f"attempt #{data.get('ble_retry_attempts', 0)})", C_ORANGE)
+                prev["ble_disconnect_s"] = ble_disc_s
+        elif conn:
+            prev["ble_disconnect_s"] = 0
 
         p        = data.get("power", 0.0)
         raw_flow = "CHARGING" if p >= 1 else ("DISCHARGING" if p <= -1 else "IDLE")

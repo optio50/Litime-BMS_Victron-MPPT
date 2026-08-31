@@ -46,9 +46,17 @@ unsigned long lastPageCycle      = 0;
 // Which BMS to update next (alternating to avoid BLE contention)
 uint8_t  bmsRound = 0;
 
-// BLE reconnect backoff state (per battery)
+// BLE reconnect state (per battery)
+// Simple running counter - no more round/cooldown cycle. The global component
+// watchdog (COMPONENT_TIMEOUT_MS) will force an ESP32 reboot if a battery
+// stays disconnected for too long.
 uint8_t       bleReconnectAttempts[2] = {0, 0};
-unsigned long bleReconnectCooldownUntil[2] = {0, 0};
+
+// Component disconnect watchdog - tracks when each component was last "healthy"
+unsigned long lastWifiOkMs   = 0;
+unsigned long lastBms1OkMs   = 0;
+unsigned long lastBms2OkMs   = 0;
+unsigned long lastMpptOkMs   = 0;
 
 // Boot button on XIAO ESP32-S3 = GPIO0 (active LOW)
 #define BOOT_BTN_PIN  0
@@ -142,53 +150,54 @@ static void connectBMS(BMSClient& bms, BatteryData& data, const char* mac,
 }
 
 // ---------------------------------------------------------------------------
-//  Attempt a runtime BLE reconnect for one battery, with backoff.
-//  Returns true if a connect() was attempted (used only for logging context).
+//  Attempt a runtime BLE reconnect for one battery.
+//  Tries bms.connect() once per call. Periodically reinitializes the BLE
+//  client (bms.init) to clear stale state that may prevent reconnection.
+//  The global component watchdog handles forcing a reboot if this goes on
+//  too long (COMPONENT_TIMEOUT_MS).
 // ---------------------------------------------------------------------------
 static void reconnectBmsIfNeeded(uint8_t idx, BMSClient& bms, BatteryData& data,
-                                  const char* name) {
-    if (bms.isConnected()) return;
-
-    data.connected = false;
-    unsigned long now = millis();
-
-    if (now < bleReconnectCooldownUntil[idx]) {
-        // Still cooling down — skip this round entirely, no BLE traffic, no log spam.
-        data.bleRetryPaused   = true;
+                                  const char* mac, const char* name) {
+    if (bms.isConnected()) {
+        // Reset disconnect tracking on successful connection
+        if (bleReconnectAttempts[idx] > 0 || data.bleDisconnectMs > 0) {
+            Serial.printf("[BLE] %s reconnected after %u attempts.\n",
+                          name, bleReconnectAttempts[idx]);
+        }
+        bleReconnectAttempts[idx] = 0;
         data.bleRetryAttempts = 0;
+        data.bleRetryPaused   = false;
+        data.bleDisconnectMs  = 0;
         return;
     }
 
-    if (data.bleRetryPaused) {
-        // Cooldown just expired — starting a fresh round of attempts.
-        Serial.printf("[BLE] %s: cooldown elapsed, resuming reconnect attempts.\n", name);
-        data.bleRetryPaused = false;
+    // Mark as disconnected and track when it started
+    data.connected = false;
+    if (data.bleDisconnectMs == 0) {
+        data.bleDisconnectMs = millis();
+        Serial.printf("[BLE] %s lost. Reconnecting...\n", name);
     }
 
-    Serial.printf("[BLE] %s lost. Reconnecting... (attempt %u/%u)\n",
-                  name, bleReconnectAttempts[idx] + 1, (unsigned)BLE_RECONNECT_MAX_ATTEMPTS);
+    // Periodically reinitialize the BLE client to clear stale state.
+    // Every 5th attempt (i.e. every ~20s at 4s per battery per round).
+    if (bleReconnectAttempts[idx] > 0 && (bleReconnectAttempts[idx] % 5) == 0) {
+        Serial.printf("[BLE] %s: reinitializing client (attempt %u).\n",
+                      name, bleReconnectAttempts[idx] + 1);
+        bms.init(mac);
+    }
 
     if (bms.connect()) {
         Serial.printf("[BLE] %s reconnected.\n", name);
-        bleReconnectAttempts[idx]      = 0;
-        bleReconnectCooldownUntil[idx] = 0;
+        bleReconnectAttempts[idx] = 0;
         data.bleRetryAttempts = 0;
         data.bleRetryPaused   = false;
+        data.bleDisconnectMs  = 0;
         return;
     }
 
     bleReconnectAttempts[idx]++;
     data.bleRetryAttempts = bleReconnectAttempts[idx];
-
-    if (bleReconnectAttempts[idx] >= BLE_RECONNECT_MAX_ATTEMPTS) {
-        Serial.printf("[BLE] %s: %u attempts failed. Pausing %lu s before retrying.\n",
-                      name, (unsigned)BLE_RECONNECT_MAX_ATTEMPTS,
-                      (unsigned long)(BLE_RECONNECT_COOLDOWN_MS / 1000UL));
-        bleReconnectCooldownUntil[idx] = now + BLE_RECONNECT_COOLDOWN_MS;
-        bleReconnectAttempts[idx]      = 0;
-        data.bleRetryAttempts = 0;
-        data.bleRetryPaused   = true;
-    }
+    data.bleRetryPaused   = false;  // always false - no more cooldown cycle
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +264,17 @@ void setup() {
     lastMqttPublish  = millis();
     lastPageCycle    = millis();
 
+    // Initialize component watchdog timestamps - all components are "OK" at
+    // startup (even if a BLE connect failed, we don't want to immediately
+    // trigger a reboot; give the reconnect logic time to work).
+    {
+        unsigned long now = millis();
+        lastWifiOkMs = now;
+        lastBms1OkMs = now;
+        lastBms2OkMs = now;
+        lastMpptOkMs = now;
+    }
+
     Serial.println("[INIT] Setup complete.");
 }
 
@@ -284,7 +304,7 @@ void loop() {
 
         if (bmsRound == 0) {
             // Battery 1
-            reconnectBmsIfNeeded(0, bms1, bat1, BMS1_NAME);
+            reconnectBmsIfNeeded(0, bms1, bat1, BMS1_MAC, BMS1_NAME);
             if (bms1.isConnected()) {
                 bms1.update();
                 delay(400);  // allow notification to arrive
@@ -292,7 +312,7 @@ void loop() {
             }
         } else {
             // Battery 2
-            reconnectBmsIfNeeded(1, bms2, bat2, BMS2_NAME);
+            reconnectBmsIfNeeded(1, bms2, bat2, BMS2_MAC, BMS2_NAME);
             if (bms2.isConnected()) {
                 bms2.update();
                 delay(400);
@@ -364,7 +384,41 @@ void loop() {
     }
 
     // ------------------------------------------------------------------
-    // 8. Debug dump every 30 s
+    // 8. Component disconnect watchdog
+    //    If ANY component (WiFi, Battery 1 BLE, Battery 2 BLE, or MPPT BLE
+    //    scan) has been disconnected for longer than COMPONENT_TIMEOUT_MS,
+    //    force an ESP32 reboot to reset the BLE/WiFi stack.
+    // ------------------------------------------------------------------
+    if (WiFi.status() == WL_CONNECTED) lastWifiOkMs = now;
+    if (bms1.isConnected())             lastBms1OkMs = now;
+    if (bms2.isConnected())             lastBms2OkMs = now;
+    // MPPT is a passive BLE scan - consider it "OK" if we've received data
+    // within the last 60 seconds (MPPT advertises ~every 5s).
+    if (mpptData.valid && (now - mpptData.last_update_ms < 60000UL)) lastMpptOkMs = now;
+
+    unsigned long wifiDown = now - lastWifiOkMs;
+    unsigned long b1Down   = now - lastBms1OkMs;
+    unsigned long b2Down   = now - lastBms2OkMs;
+    unsigned long mpptDown = now - lastMpptOkMs;
+
+    if (wifiDown > (unsigned long)COMPONENT_TIMEOUT_MS ||
+        b1Down   > (unsigned long)COMPONENT_TIMEOUT_MS ||
+        b2Down   > (unsigned long)COMPONENT_TIMEOUT_MS ||
+        mpptDown > (unsigned long)COMPONENT_TIMEOUT_MS) {
+
+        Serial.println("[WDT] Component disconnect timeout! Forcing reboot:");
+        Serial.printf("  WiFi down: %lus  B1 down: %lus  B2 down: %lus  MPPT down: %lus\n",
+                      wifiDown / 1000UL, b1Down / 1000UL,
+                      b2Down / 1000UL, mpptDown / 1000UL);
+        Serial.printf("  Threshold: %lus\n", (unsigned long)(COMPONENT_TIMEOUT_MS / 1000UL));
+
+        // Give the serial output time to flush before rebooting
+        delay(200);
+        ESP.restart();
+    }
+
+    // ------------------------------------------------------------------
+    // 9. Debug dump every 30 s
     // ------------------------------------------------------------------
     static unsigned long lastDebug = 0;
     if (now - lastDebug >= 30000) {

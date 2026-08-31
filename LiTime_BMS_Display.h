@@ -9,8 +9,9 @@
 // Mirror of BMSClient::BMSData plus connectivity flag + computed fields
 struct BatteryData {
     bool     connected       = false;
-    uint8_t  bleRetryAttempts = 0;     // consecutive failed reconnect attempts in current round
-    bool     bleRetryPaused   = false; // true while waiting out the reconnect cooldown
+    uint8_t  bleRetryAttempts = 0;     // total failed reconnect attempts since disconnect
+    bool     bleRetryPaused   = false; // always false now (kept for MQTT backward compat)
+    unsigned long bleDisconnectMs = 0; // millis() when disconnect first detected (0 = never)
     float    totalVoltage    = 0.0f;
     float    cellVoltageSum  = 0.0f;
     float    current         = 0.0f;

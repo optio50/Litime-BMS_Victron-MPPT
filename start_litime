@@ -1,0 +1,6 @@
+#!/bin/bash
+
+cd '/home/chromebox/Litime-BMS_Victron-MPPT'
+source 'venv/bin/activate'
+/home/chromebox/Litime-BMS_Victron-MPPT/litime_monitor.py
+deactivate

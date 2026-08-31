@@ -73,6 +73,9 @@ void MQTTManager::_publishBattery(const BatteryData& b, const char* prefix, uint
     doc["connected"]       = b.connected;
     doc["ble_retry_paused"]   = b.bleRetryPaused;
     doc["ble_retry_attempts"] = b.bleRetryAttempts;
+    // Seconds since BLE disconnect was first detected (0 if connected)
+    doc["ble_disconnect_s"]  = b.connected ? 0 :
+        (uint32_t)((millis() - b.bleDisconnectMs) / 1000UL);
     doc["soc"]             = b.soc;
     doc["soh"]             = b.soh.c_str();
     doc["total_voltage"]   = serialized(String(b.totalVoltage, 3));
