@@ -20,6 +20,12 @@
 #define MQTT_TOPIC_BASE  "litime"          // Topics: litime/battery1, litime/battery2, litime/combined
 #define MQTT_VICTRON_TOPIC_BASE  "victron"  // Topics: victron/state, victron/batt_v, etc.
 
+// --- OTA firmware update (ElegantOTA, http://<esp-ip>/update) ------------------
+// Password for the firmware upload web page (username is always "admin").
+// Leave empty for no authentication. Changing this requires a re-flash of
+// the firmware (it is compiled in, not stored on the device).
+#define OTA_PASSWORD      ""
+
 // --- Weather Forecast URL (shown in MPPT "Weather" sub-tab) ----------------
 // Point this at any weather page to get a quick solar/rain forecast.
 // International users: change "en-us" to your locale (en-gb, de-de, etc.)

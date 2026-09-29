@@ -16,11 +16,14 @@ Topics consumed:
     victron/<field>              - flat scalar topics (optional)
 """
 
+import base64
+import hashlib
 import sys
 import os
 import json
 import time
 import copy
+import fcntl
 import random
 from datetime import datetime
 from threading import Thread, Event
@@ -33,11 +36,14 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QGridLayout, QLabel, QProgressBar, QGroupBox,
     QTextBrowser, QSplitter, QFrame, QSizePolicy,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QPushButton
+    QAbstractItemView, QPushButton, QFileDialog
 )
 from PyQt5 import QtCore, QtGui
-from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QObject, QIODevice, QByteArray
+from PyQt5.QtCore import (Qt, QTimer, QUrl, pyqtSignal, QObject, QIODevice,
+                          QByteArray, QFile)
 from PyQt5.QtGui import QFont, QColor, QPalette, QPixmap
+from PyQt5.QtNetwork import (QNetworkAccessManager, QNetworkRequest,
+                             QNetworkReply, QHttpMultiPart, QHttpPart)
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
 
 import pyqtgraph as pg
@@ -53,12 +59,34 @@ import paho.mqtt.client as mqtt
 
 import shared_config
 
-# Each process gets its own isolated QtWebEngine profile directory so two
-# instances running at once don't fight over Chromium's SQLite cookie
-# database (the "database is locked" errors). --log-level=3 caps Chromium
-# logging at FATAL, silencing noisy database.cc / service_worker_storage
-# ERROR messages that --disable-logging alone doesn't suppress.
-_qt_profile_dir = os.path.join("/tmp", f"litime_qt_{os.getpid()}")
+# QtWebEngine profile directory selection. The weather site (e.g. MSN
+# Weather) remembers its dark-theme choice in cookies / local storage, so
+# the profile must SURVIVE restarts -- the old per-run /tmp dir meant the
+# site came back with its blinding white theme every launch. BUT two
+# instances running at once must never share a profile dir (Chromium's
+# SQLite cookie "database is locked" errors), so a lock file decides: the
+# FIRST instance gets the persistent profile under ~/.cache, any later
+# concurrent instance falls back to an isolated throwaway per-PID dir.
+# flock() is released automatically by the kernel when the process dies,
+# so a crashed instance can never leave a stale lock behind. --log-level=3
+# caps Chromium logging at FATAL, silencing noisy database.cc /
+# service_worker_storage ERROR messages that --disable-logging alone
+# doesn't suppress.
+_persistent_profile = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+    "litime_qt_profile")
+try:
+    os.makedirs(_persistent_profile, exist_ok=True)
+    _profile_lock_fd = os.open(_persistent_profile + ".lock",
+                               os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(_profile_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:            # another instance holds the persistent profile
+        os.close(_profile_lock_fd)
+        raise
+    _qt_profile_dir = _persistent_profile
+except OSError:                  # no persistent profile available -> isolate
+    _qt_profile_dir = os.path.join("/tmp", f"litime_qt_{os.getpid()}")
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
     f"--disable-logging --log-level=3 --user-data-dir={_qt_profile_dir}"
 )
@@ -87,6 +115,9 @@ WEATHER_URL  = _cfg.get("WEATHER_URL", "")
 SOC_RESERVE_PCT = _cfg.get("SOC_RESERVE_PCT", 10)
 ARRAY_NAME   = _cfg.get("ARRAY_NAME", "Solar Array")
 BAT_NAME     = {1: BAT1_NAME, 2: BAT2_NAME}
+# OTA upload-page password (config.h OTA_PASSWORD) — used only to display a
+# hint on the ESP Update tab; the embedded web view itself asks for it.
+OTA_PASSWORD = _cfg.get("OTA_PASSWORD", "")
 
 # All charts are fed once per UI refresh tick (self.timer, 2 s interval —
 # see Window.__init__), regardless of how often MQTT messages actually
@@ -95,7 +126,9 @@ BAT_NAME     = {1: BAT1_NAME, 2: BAT2_NAME}
 # so old data actually ages out of every chart after 24 hours instead of
 # accumulating 48h+ of history.
 CHART_MAX_PTS = 43200
-CHART_ROLL    = 600   # seconds of x-axis kept in view
+CHART_ROLL    = 600   # roll_on_tick: x-axis shifts once per 600 plotted
+                      # points — 20 min @ the fixed 1 pt / 2 s cadence
+CHART_PT_S    = 2     # fixed chart cadence: 1 point per 2-s UI tick (above)
 # The SOC / Combined-Power charts on the Overview page sit side-by-side in a
 # splitter (half width each), so their DATETIME tick labels have less room
 # than full-width charts and can overlap at the default zoom. A narrower
@@ -135,6 +168,12 @@ BAR_HEAD_S = 600
 #                  overshoot is ~1 chart tick (2 s), so this only trips on a
 #                  genuine desync. Manual zoom/pan views are exempt (their
 #                  manual_range flag is set); the corner "A" button resumes.
+#                  Runs from the FIRST plotted points (not only once
+#                  roll_on_tick points are buffered): healthy first-cycle
+#                  windows (pglive's own startup window, or the one pinned
+#                  by _pin_first_cycle_window) have a full roll cycle of
+#                  room ahead, so the threshold alone still leaves the
+#                  startup march untouched.
 LINE_HEAL_S = 10
 # =============================================================================
 
@@ -820,8 +859,10 @@ class FastCategorizedBarPlot(LiveCategorizedBarPlot):
 #  recording every tick, so hidden widgets' connectors get a huge
 #  plot_timeout; the deque appends in the refresh() methods stay
 #  unconditional, so NO data is ever lost. A hidden -> visible transition
-#  re-plots the buffered history immediately and re-aligns rolling_index
-#  (see _catch_up_connector below). Each tab calls its throttle at the top
+#  re-plots the buffered history immediately, re-aligns rolling_index and,
+#  during the first roll cycle, pins a full-width startup window (see
+#  _catch_up_connector and _pin_first_cycle_window below). Each tab calls
+#  its throttle at the top
 #  of refresh() (the 2-s self-healing safety net, also covering minimize /
 #  restore) and hooks its tab widgets' currentChanged for an instant
 #  refresh on tab clicks.
@@ -831,28 +872,45 @@ def _throttle_line_chart_pairs(pairs):
     (LivePlotWidget, [DataConnector, ...]) tuples."""
     for widget, conns in pairs:
         visible = widget.isVisible()
+        roll = widget.x_range_controller.roll_on_tick
         if visible:
+            caught_up = False
             for conn in conns:
                 if conn.plot_timeout:
                     # Hidden -> visible transition: restore live plotting
                     # and re-plot the buffered history right now.
                     conn.plot_timeout = 0.0
                     _catch_up_connector(conn)
-            # Overshoot self-heal (steady state only — see LINE_HEAL_S): if
-            # the newest point has run past the visible right edge by more
-            # than LINE_HEAL_S (clock step / missed ticks desyncing the
-            # append-count roll counter from the timestamp-anchored window),
-            # force a roll NOW instead of letting the line sit off-screen
-            # until the counter catches up. Manual views are exempt; skipped
-            # while < roll_on_tick points are buffered so the normal
-            # first-cycle startup window is untouched.
-            roll = widget.x_range_controller.roll_on_tick
+                    caught_up = True
+            # A chart caught up during its FIRST roll cycle (< roll_on_tick
+            # points buffered) never saw pglive's own startup ticks 0/1, so
+            # the boundary emit above computed its window from the SHORT
+            # buffered history — barely any room ahead of the newest point
+            # while the next natural roll tick is a FULL roll cycle of
+            # appends away: the line runs off-screen right within minutes
+            # and sits there for up to ~20 min. Pin the full-width startup
+            # window instead (see _pin_first_cycle_window).
+            if (caught_up and roll and not widget.manual_range
+                    and 0 < len(conns[0].x) < roll):
+                _pin_first_cycle_window(widget, conns, roll)
+            # Overshoot self-heal (see LINE_HEAL_S): if the newest point has
+            # run past the visible right edge by more than LINE_HEAL_S
+            # (clock step / missed ticks desyncing the append-count roll
+            # counter from the timestamp-anchored window — or any leftover
+            # short-room first-cycle window), force a roll NOW instead of
+            # letting the line sit off-screen until the counter catches up.
+            # Manual views are exempt. A healthy window — pglive's own
+            # startup window or the pin above — always has a full roll
+            # cycle of room ahead, so the threshold alone leaves the normal
+            # startup march untouched, from the first plotted points on.
             if (not widget.manual_range and roll
-                    and len(conns[0].x) > roll):
+                    and len(conns[0].x) > 2):
                 edge = widget.getViewBox().viewRange()[0][1]
                 if conns[0].x[-1] - edge > LINE_HEAL_S:
                     for conn in conns:
                         _catch_up_connector(conn)
+                    if len(conns[0].x) < roll:
+                        _pin_first_cycle_window(widget, conns, roll)
         else:
             for conn in conns:
                 conn.plot_timeout = 3600.0             # effectively stop re-plotting
@@ -884,6 +942,51 @@ def _catch_up_connector(conn):
     conn.last_plot = time.perf_counter() - 3600.0     # force past plot_timeout
     conn._update_data()                               # full-deque setData
     conn.sig_data_roll_tick.emit(conn, conn.rolling_index)
+
+
+def _pin_first_cycle_window(widget, conns, roll):
+    """Full-width startup window for a chart caught up (or healed) during
+    its FIRST roll cycle — fewer than roll_on_tick points buffered.
+
+    pglive computes a roll-tick window from data_bounds(offset=roll_on_tick),
+    which for a short history spans only those few points: the newest point
+    gets just that much room ahead, while the next natural roll tick is a
+    full roll_on_tick of appends away (~20 min @ 1 pt / 2 s). The line runs
+    off-screen right within minutes and sits there for most of a cycle —
+    exactly what a chart first shown early after app start does (it was
+    hidden while pglive's startup ticks 0/1 fired, so the catch-up boundary
+    emit was its first-ever window).
+
+    Pin the window the chart would have had if it had been visible from app
+    start: a full roll cycle of room ahead (roll_on_tick points @ the fixed
+    1 pt / 2 s cadence), left edge clamped to the oldest buffered point so
+    the trace starts at the left edge and marches right — the same startup
+    look as pglive's tick-1 window and the bar chart's BAR_TAIL_S clamp.
+    The next natural boundary then lands roll_on_tick appends later, the
+    same moment the line reaches the right edge, where pglive's own math
+    takes over with a proper full-history window (>= roll_on_tick points
+    exist by then, so the handover is seamless).
+
+    Two details keep pglive from stomping the pin seconds later:
+      * its cached "final" x-ranges — replayed by every non-boundary roll
+        tick, which fires whenever the y-bounds move — are synced to the
+        pin, and
+      * each connector's rolling_index is stepped PAST the boundary just
+        emitted, so the next append is a non-boundary tick instead of a
+        boundary tick that would recompute the short window over the
+        still-short history."""
+    x = conns[0].x
+    if not x or not roll:
+        return
+    room = roll * CHART_PT_S                  # full roll cycle of room ahead
+    rng = [max(x[0], x[-1] - room / 2.0),     # steady-state left offset,
+           x[-1] + room]                      # clamped to the oldest point
+    widget.setXRange(rng[0], rng[1], padding=0)
+    widget.x_range_controller.final_x_range = list(rng)
+    widget.final_x_range = list(rng)
+    for conn in conns:
+        if conn.rolling_index % roll == 0:
+            conn.rolling_index += 1
 
 # =============================================================================
 #  ─── LIVE CHART FACTORY ──────────────────────────────────────────────────────
@@ -1871,6 +1974,72 @@ class _QuietWebPage(QWebEnginePage):
         return self
 
 
+def _esp_help_html(esp_ip: str | None) -> str:
+    """Instructions panel for the ESP Update tab. The ESP IP, OTA URL and
+    curl line are filled in as soon as the retained <TOPIC_BASE>/ip message
+    arrives; until then they show a 'waiting' placeholder. Regenerated by
+    Window._apply_esp_ip() so the panel always matches the live device."""
+    if esp_ip:
+        base = f"http://{esp_ip}"
+        ota_url = f"{base}/update"
+        curl_cmd = (f"curl {base}/ota/start && "
+                    f"curl -F &quot;file=@Litime-BMS_Victron-MPPT.ino.bin&quot; "
+                    f"{base}/ota/upload")
+        row_ip = f"<b style='color:{C_GREEN}'>{esp_ip}</b>"
+        row_url = f"<a href='{ota_url}' style='color:{C_CYAN}'>{ota_url}</a>"
+        row_curl = f"<code style='color:{C_ORANGE}'>{curl_cmd}</code>"
+        wait = ""
+    else:
+        row_ip = f"<i style='color:{C_DIM}'>waiting for {TOPIC_BASE}/ip…</i>"
+        row_url = f"<i style='color:{C_DIM}'>waiting for {TOPIC_BASE}/ip…</i>"
+        row_curl = f"<i style='color:{C_DIM}'>available once the IP is known</i>"
+        wait = (f"<p style='color:{C_ORANGE}'>The ESP32 has not published its "
+                f"IP yet — it does so on every MQTT (re)connect.</p>")
+
+    auth = ("username <b>admin</b>, password from <code>OTA_PASSWORD</code> "
+            "in config.h") if OTA_PASSWORD else "none (no password set)"
+
+    return f"""
+<body style='margin:0;font-family:sans-serif;line-height:1.45'>
+<h2 style='color:{C_CYAN};margin:2px 0 10px 0'>ESP32 Firmware Update (OTA)</h2>
+{wait}
+<p><b style='color:{C_TEXT}'>Workflow</b></p>
+<ol style='padding-left:20px;margin:4px 0 10px 0'>
+  <li>Compile the sketch in Arduino IDE — board <b>XIAO_ESP32S3</b>, Flash
+      Size <b>8MB</b>, Partition <b>Default with spiffs (3MB APP/1.5MB
+      SPIFFS)</b> (the board default — OTA-capable; any scheme whose name
+      says &quot;No OTA&quot; will not work).</li>
+  <li><i>Sketch → Export Compiled Binary</i> (Ctrl+Alt+S) — saves the
+      <code>.bin</code> next to the sketch folder.</li>
+  <li>On the panel to the right: click <b>Choose .bin…</b>, then press
+      <b>Upload firmware</b>. Progress shows on the bar here (and on the
+      physical LCD).</li>
+  <li>The ESP32 flashes the <b>inactive</b> app partition, verifies it,
+      and <b>auto-reboots</b> into it — it comes back online by itself
+      after ~30 s.</li>
+</ol>
+<p><b style='color:{C_TEXT}'>This device</b></p>
+<table style='margin:4px 0 10px 0'>
+  <tr><td style='padding:2px 12px 2px 0;color:{C_DIM}'>ESP32 IP</td><td>{row_ip}</td></tr>
+  <tr><td style='padding:2px 12px 2px 0;color:{C_DIM}'>OTA page</td><td>{row_url}</td></tr>
+  <tr><td style='padding:2px 12px 2px 0;color:{C_DIM}'>Page auth</td><td>{auth}</td></tr>
+</table>
+<p><b style='color:{C_TEXT}'>CLI shortcuts</b></p>
+<p style='margin:4px 0'>Upload without a browser:</p>
+<p style='margin:4px 0'>{row_curl}</p>
+<p style='margin:4px 0'>Reboot via MQTT:</p>
+<p style='margin:4px 0'><code style='color:{C_ORANGE}'>mosquitto_pub -h {MQTT_BROKER} -t {TOPIC_BASE}/cmd -m REBOOT</code>
+&nbsp;— or just press <b>Reboot ESP32</b> above.</p>
+<p><b style='color:{C_TEXT}'>Safety</b></p>
+<p style='margin:4px 0;color:{C_DIM}'>OTA writes the <b>inactive</b> app
+partition and swaps on reboot — a failed or interrupted upload can never
+brick the device (the old firmware keeps running). The very first flash of
+this feature (and any partition-scheme change) must still be done over
+USB; after that the cable can stay in the drawer.</p>
+</body>
+"""
+
+
 class MpptTab(QWidget):
     """Inner tab widget with one 24-hour live chart per MPPT metric,
     matching the per-battery inner chart-tab layout. A statistics panel
@@ -1938,11 +2107,17 @@ class MpptTab(QWidget):
         # peak-downsampling pass and the hidden-chart throttle pairs below.
         self._mppt_charts = []
 
-        def add_chart_tab(title, y_label, color=C_YELLOW):
-            # Plain line, NO fillLevel/brush area fill (see the BatteryPanel
-            # Tab-1 note): an alpha-blended fill in 50-point chunks freezes
-            # the UI for many seconds on a full-history "View All" repaint.
-            plot = LiveLinePlot(pen=pg.mkPen(color, width=1.5), name=title)
+        def add_chart_tab(title, y_label, color=C_YELLOW, fill_brush=None):
+            # Plain line by default, NO fillLevel/brush area fill (see the
+            # BatteryPanel Tab-1 note): an alpha-blended fill in 50-point
+            # chunks freezes the UI for many seconds on a full-history
+            # "View All" repaint. fill_brush opts a chart into an area fill
+            # (owner preference — same tradeoff as the Combined Power chart).
+            if fill_brush is not None:
+                plot = LiveLinePlot(pen=pg.mkPen(color, width=1.5), name=title,
+                                    fillLevel=0, brush=fill_brush)
+            else:
+                plot = LiveLinePlot(pen=pg.mkPen(color, width=1.5), name=title)
             conn  = make_connector(plot)
             chart = make_chart(f"{title} – 24 hrs", y_label=y_label)
             chart.addItem(plot)
@@ -1953,7 +2128,8 @@ class MpptTab(QWidget):
             chart_tabs.addTab(w, title)
             return conn
 
-        self.c_pv_w   = add_chart_tab("PV Power",       "Watts", C_BLUE)
+        self.c_pv_w   = add_chart_tab("PV Power",       "Watts", C_BLUE,
+                                       fill_brush=(0, 0, 102, 200))
         self.c_batt_v = add_chart_tab("Battery Voltage", "V",     C_GREEN)
         self.c_batt_a = add_chart_tab("Battery Current", "A",     C_ORANGE)
         self.c_yield  = add_chart_tab("Yield Today",     "kWh",   C_MAGENTA)
@@ -2017,7 +2193,13 @@ class MpptTab(QWidget):
         self.weather_tab_index = None
         if WEATHER_URL:
             self.weather_view = QWebEngineView()
-            self.weather_view.setPage(_QuietWebPage(self.weather_view))
+            _wpage = _QuietWebPage(self.weather_view)
+            # Chromium's default page background is white; paint it the
+            # dashboard dark grey instead so the tab never flashes a
+            # harsh white surface while the page is loading/compositing
+            # (most visible the first time the tab is shown).
+            _wpage.setBackgroundColor(QColor(C_BG))
+            self.weather_view.setPage(_wpage)
             self.weather_view.setUrl(QUrl(WEATHER_URL))
 
             nav_bar = QHBoxLayout()
@@ -2392,11 +2574,18 @@ class Window(QMainWindow):
             f" font-weight: bold; border: 1px solid {C_BORDER}; padding: 4px; }}")
         self._raw_mqtt: dict[str, str] = {}
 
-        # Wrap Log + MQTT Raw in a sub-tab widget under a single "Log" tab.
+        # ESP Update tab — embedded OTA upload page + instructions. The
+        # ESP32's IP arrives later via the retained <TOPIC_BASE>/ip message
+        # (published by the firmware on every MQTT connect).
+        self._esp_ip = None
+        self.esp_update_tab = self._build_esp_update_tab()
+
+        # Wrap Log + MQTT Raw + ESP Update in a sub-tab widget under a single "Log" tab.
         self.log_container = QTabWidget()
         self.log_container.setDocumentMode(True)
         self.log_container.addTab(self.log_tab,      "Event Log")
         self.log_container.addTab(self.mqtt_raw_tab, "MQTT Raw")
+        self.log_container.addTab(self.esp_update_tab, "ESP Update")
 
         # Tabs: Overview | Battery 1 | Battery 2 | MPPT | Log
         self.tabs.addTab(self.overview_tab,  "Overview")
@@ -2447,6 +2636,263 @@ class Window(QMainWindow):
 
         self._init_event_tracking()
         self._log(f"App started – connecting to {MQTT_BROKER}:{MQTT_PORT}", C_DIM)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  ESP Update tab (Log ▸ ESP Update)
+    #  Left: workflow instructions + live IP/URL. Right: a native Qt upload
+    #  panel (file picker + progress bar + status) that POSTs the .bin
+    #  straight to the firmware's ElegantOTA endpoint at
+    #  http://<esp-ip>/update, plus a Reboot button that publishes REBOOT
+    #  to <TOPIC_BASE>/cmd. Styled by the app's global dark stylesheet.
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_esp_update_tab(self) -> QWidget:
+        w = QWidget()
+        root = QHBoxLayout(w)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+
+        # ── Left: instructions panel (QTextBrowser, like the Event Log) ───
+        self.esp_help = QTextBrowser()
+        self.esp_help.setOpenExternalLinks(True)   # OTA URL opens in a browser
+        self.esp_help.setStyleSheet(
+            f"QTextBrowser {{ background:{C_BG}; color:{C_TEXT};"
+            f" border:1px solid {C_BORDER}; font-size:13px; }}"
+        )
+        self.esp_help.setMinimumWidth(340)
+        self.esp_help.setMaximumWidth(560)
+        self.esp_help.setHtml(_esp_help_html(None))
+        root.addWidget(self.esp_help)
+
+        # ── Right: native upload panel (matches the app's dark theme). No
+        #    embedded web view — ElegantOTA's stock UI is light-themed and
+        #    its dark toggle misbehaves inside QtWebEngine, so we drive the
+        #    SAME HTTP POST endpoint (http://<esp-ip>/update) directly from
+        #    Qt — exactly what curl -F does. ────────────────────────────────
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(4, 4, 4, 4)
+        rl.setSpacing(10)
+
+        grp = QGroupBox("Firmware Upload")
+        gl = QVBoxLayout(grp)
+        gl.setSpacing(8)
+
+        file_row = QHBoxLayout()
+        self.ota_file_lbl = QLabel("No firmware file selected")
+        self.ota_file_lbl.setStyleSheet(f"color:{C_DIM};")
+        self.ota_choose_btn = QPushButton("Choose .bin…")
+        self.ota_choose_btn.setCursor(Qt.PointingHandCursor)
+        self.ota_choose_btn.clicked.connect(self._ota_choose_file)
+        file_row.addWidget(self.ota_file_lbl, 1)
+        file_row.addWidget(self.ota_choose_btn)
+        gl.addLayout(file_row)
+
+        btn_row = QHBoxLayout()
+        self.ota_upload_btn = QPushButton("⬆ Upload firmware")
+        self.reboot_btn     = QPushButton("⟳ Reboot ESP32")
+        for b in (self.ota_upload_btn, self.reboot_btn):
+            b.setCursor(Qt.PointingHandCursor)
+        self.ota_upload_btn.setEnabled(False)
+        self.reboot_btn.setEnabled(False)
+        self.ota_upload_btn.clicked.connect(self._ota_start_upload)
+        self.reboot_btn.clicked.connect(self._reboot_esp32)
+        btn_row.addWidget(self.ota_upload_btn)
+        btn_row.addWidget(self.reboot_btn)
+        btn_row.addStretch()
+        gl.addLayout(btn_row)
+
+        self.ota_progress = QProgressBar()
+        self.ota_progress.setRange(0, 100)
+        self.ota_progress.setValue(0)
+        gl.addWidget(self.ota_progress)
+
+        self.ota_status_lbl = QLabel("Waiting for the ESP32 to report its IP…")
+        self.ota_status_lbl.setWordWrap(True)
+        gl.addWidget(self.ota_status_lbl)
+
+        rl.addWidget(grp)
+        rl.addStretch()
+
+        # QNetworkAccessManager for the OTA POST (kept alive on the Window)
+        self._ota_nam = QNetworkAccessManager(self)
+
+        root.addWidget(right, 1)
+        return w
+
+    def _ota_page_url(self) -> str:
+        """ElegantOTA's browser page (kept for the help panel / browser use);
+        the native uploader talks to /ota/start + /ota/upload instead."""
+        return f"http://{self._esp_ip}/update" if self._esp_ip else ""
+
+    def _apply_esp_ip(self, ip: str):
+        """Fill in everything that depends on the ESP32's IP: the help
+        panel's live rows and the upload-panel buttons."""
+        self._esp_ip = ip
+        self.esp_help.setHtml(_esp_help_html(ip))
+        self._ota_update_buttons()
+        self.ota_status_lbl.setText("Ready — the ESP32 is available for uploads.")
+
+    # ── OTA upload (HTTP POST to ElegantOTA's /update endpoint) ──────────────
+    def _ota_choose_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select firmware binary", os.path.expanduser("~"),
+            "Firmware (*.bin *.bin.gz)")
+        if not path:
+            return
+        self._ota_file_path = path
+        try:
+            size_kb = os.path.getsize(path) / 1024
+        except OSError:
+            size_kb = 0
+        self.ota_file_lbl.setText(
+            f"{os.path.basename(path)}  ({size_kb:,.0f} KB)")
+        self.ota_file_lbl.setStyleSheet(f"color:{C_TEXT};")
+        self._ota_update_buttons()
+
+    def _ota_update_buttons(self):
+        """Upload needs: a chosen file + the ESP IP + no upload in flight.
+        Reboot needs: the ESP online (broker_status) + no upload in flight."""
+        uploading = (getattr(self, "_ota_reply", None) is not None
+                     or getattr(self, "_ota_start_reply", None) is not None)
+        have_file = getattr(self, "_ota_file_path", None) is not None
+        self.ota_upload_btn.setEnabled(have_file and self._esp_ip is not None
+                                       and not uploading)
+        self.reboot_btn.setEnabled(broker_status == "online"
+                                   and self._esp_ip is not None
+                                   and not uploading)
+
+    def _ota_start_upload(self):
+        """Two-step ElegantOTA 3.x handshake (exactly what its stock web UI
+        does behind the scenes):
+          1. GET /ota/start?hash=<md5>   — opens the OTA session on the
+             device; the MD5 makes the flasher verify the written image.
+          2. POST multipart/form-data to /ota/upload — the .bin itself.
+        The device flashes the inactive app partition, and reboots ~2 s
+        after the POST returns 200."""
+        if not self._esp_ip or getattr(self, "_ota_file_path", None) is None:
+            return
+
+        # MD5 so Update.end() verifies the written image against the file
+        try:
+            with open(self._ota_file_path, "rb") as fh:
+                md5 = hashlib.md5(fh.read()).hexdigest()
+        except OSError as e:
+            self.ota_status_lbl.setText(f"Cannot read {self._ota_file_path}: {e}")
+            self._log(f"OTA upload: cannot read {self._ota_file_path}: {e}", C_RED)
+            return
+
+        start_url = QUrl(f"http://{self._esp_ip}/ota/start?hash={md5}")
+        self._ota_start_reply = self._ota_nam.get(QNetworkRequest(start_url))
+        self._ota_start_reply.finished.connect(self._ota_start_done)
+
+        self.ota_progress.setValue(0)
+        self.ota_status_lbl.setText("Starting OTA session on the ESP32…")
+        self.ota_upload_btn.setEnabled(False)
+        self.reboot_btn.setEnabled(False)
+        self._log(f"OTA session starting: {os.path.basename(self._ota_file_path)}"
+                  f" (md5 {md5})", C_CYAN)
+
+    def _ota_start_done(self):
+        """Step 2: the /ota/start GET finished — now stream the file."""
+        reply = self._ota_start_reply
+        self._ota_start_reply = None
+        code = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        if code != 200:
+            body = bytes(reply.readAll()).decode(errors="replace")[:120]
+            self.ota_status_lbl.setText(
+                f"Could not start OTA session (HTTP {code}) {body}")
+            self._log(f"OTA start FAILED (HTTP {code}) {body}", C_RED)
+            reply.deleteLater()
+            self._ota_update_buttons()
+            return
+        reply.deleteLater()
+
+        f = QFile(self._ota_file_path)
+        if not f.open(QIODevice.ReadOnly):
+            self.ota_status_lbl.setText(f"Cannot open {self._ota_file_path}")
+            self._log(f"OTA upload: cannot open {self._ota_file_path}", C_RED)
+            self._ota_update_buttons()
+            return
+        self._ota_file = f   # keep the QFile alive for the whole upload
+
+        part = QHttpPart()
+        part.setHeader(QNetworkRequest.ContentTypeHeader,
+                       "application/octet-stream")
+        part.setHeader(QNetworkRequest.ContentDispositionHeader,
+                       'form-data; name="file"; filename="firmware.bin"')
+        part.setBodyDevice(f)
+
+        multi = QHttpMultiPart(QHttpMultiPart.FormDataType)
+        f.setParent(multi)   # QFile lifetime tied to the multipart container
+        multi.append(part)
+
+        upload_url = QUrl(f"http://{self._esp_ip}/ota/upload")
+        req = QNetworkRequest(upload_url)
+        if OTA_PASSWORD:
+            token = base64.b64encode(
+                f"admin:{OTA_PASSWORD}".encode()).decode()
+            req.setRawHeader(b"Authorization", b"Basic " + token.encode())
+
+        self._ota_multi = multi            # keep alive during the upload
+        self._ota_reply = self._ota_nam.post(req, multi)
+        self._ota_reply.uploadProgress.connect(self._ota_upload_progress)
+        self._ota_reply.finished.connect(self._ota_upload_finished)
+
+        self.ota_status_lbl.setText(
+            f"Uploading to http://{self._esp_ip}/ota/upload …")
+
+    def _ota_upload_progress(self, sent, total):
+        if total > 0:
+            self.ota_progress.setValue(int(sent * 100 / total))
+            self.ota_status_lbl.setText(
+                f"Uploading… {sent / 1024:,.0f} / {total / 1024:,.0f} KB")
+
+    def _ota_upload_finished(self):
+        reply = self._ota_reply
+        self._ota_reply = None
+        code = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        err  = reply.error()
+        if err == QNetworkReply.NoError and code == 200:
+            self.ota_progress.setValue(100)
+            self.ota_status_lbl.setText(
+                "Upload complete — ESP32 is rebooting into the new firmware…")
+            self._log("OTA upload OK (verified md5, HTTP 200) – ESP32 "
+                      "rebooting into the new firmware", C_GREEN)
+        else:
+            body = bytes(reply.readAll()).decode(errors="replace")[:160]
+            self.ota_status_lbl.setText(
+                f"Upload failed (HTTP {code} — {err}). {body} "
+                "The old firmware is still running.")
+            self._log(f"OTA upload FAILED (HTTP {code} — {err}) {body} – "
+                      "device kept its old firmware", C_RED)
+        reply.deleteLater()
+        self._ota_file = None
+        self._ota_multi = None
+        self._ota_update_buttons()
+
+    def _reboot_esp32(self):
+        """Publish REBOOT to <TOPIC_BASE>/cmd — the firmware's MQTT callback
+        publishes "rebooting", cleanly disconnects, and restarts."""
+        if mqtt_client is None or not mqtt_connected:
+            self._log("ESP32 reboot NOT sent – MQTT is not connected", C_RED)
+            return
+        mqtt_client.publish(f"{TOPIC_BASE}/cmd", "REBOOT", qos=1)
+        self._log(f"ESP32 reboot requested (published REBOOT to {TOPIC_BASE}/cmd)",
+                  C_ORANGE)
+        self.reboot_btn.setEnabled(False)
+
+    def _on_esp_ip(self, ip: str):
+        ip = ip.strip()
+        if not ip or ip == self._esp_ip:
+            return
+        self._apply_esp_ip(ip)
+        self._log(f"ESP32 reports IP {ip} – OTA page http://{ip}/update", C_DIM)
+
+    def _on_esp_status(self, status: str):
+        if status == "rebooting":
+            self._log("ESP32: rebooting…", C_ORANGE)
+        # Reboot button only works while the device is actually online
+        self.reboot_btn.setEnabled(status == "online" and self._esp_ip is not None)
 
     # ── event tracking ────────────────────────────────────────────────────────
     # Battery flow (CHARGING/IDLE/DISCHARGING) chatter is suppressed with a
@@ -2689,6 +3135,13 @@ class Window(QMainWindow):
             # LiTime status (LWT string, not JSON)
             if topic == f"{TOPIC_BASE}/status":
                 broker_status = payload
+                self._on_esp_status(payload)
+                return
+
+            # ESP32 IP announcement (plain string, retained; not JSON) –
+            # published by the firmware on every MQTT (re)connect
+            if topic == f"{TOPIC_BASE}/ip":
+                self._on_esp_ip(payload)
                 return
 
             # All other LiTime and Victron topics are JSON

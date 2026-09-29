@@ -12,6 +12,7 @@
 //    • Adafruit GFX Library
 //    • PubSubClient        (Nick O'Leary)
 //    • ArduinoJson         (Benoit Blanchon) v7+
+//    • ElegantOTA          (Ayush Sharma)  – WiFi firmware updates at /update
 //
 //  Board: "XIAO_ESP32S3"  (Seeed XIAO ESP32S3 in Arduino boards manager)
 // =============================================================================
@@ -26,6 +27,7 @@
 #include "display_manager.h"
 #include "mqtt_manager.h"
 #include "victron_mppt.h"
+#include "ota_manager.h"
 
 // ---------------------------------------------------------------------------
 //  Globals
@@ -34,6 +36,7 @@ BMSClient     bms1, bms2;
 BatteryData   bat1, bat2;
 DisplayManager display;
 MQTTManager   mqttMgr;
+OtaManager    otaMgr;
 VictronMPPT   victronMppt;
 VictronData   mpptData;
 
@@ -231,6 +234,7 @@ void setup() {
         display.showScanStatus("WiFi: connected. Starting MQTT...");
         delay(500);
         mqttMgr.begin();
+        otaMgr.begin();   // OTA update page: http://<this-ip>/update
     } else {
         display.showScanStatus("WiFi: FAILED. MQTT disabled.");
         delay(2000);
@@ -294,6 +298,30 @@ void loop() {
         delay(500);
     } else {
         mqttMgr.loop();
+    }
+
+    // ------------------------------------------------------------------
+    // 1b. OTA web server (http://<ip>/update)
+    // ------------------------------------------------------------------
+    otaMgr.handle();
+
+    if (otaMgr.consumeActivityFlag()) {
+        // A (failed) OTA upload just finished — server.handleClient() blocks
+        // the main loop for the whole upload, so reset the component
+        // watchdog timestamps to "now" instead of tripping an immediate
+        // spurious reboot. (Successful uploads reboot inside ElegantOTA
+        // before ever reaching here.)
+        lastWifiOkMs = lastBms1OkMs = lastBms2OkMs = lastMpptOkMs = now;
+    }
+
+    // ------------------------------------------------------------------
+    // 1c. MQTT reboot command (litime/cmd = "REBOOT")
+    // ------------------------------------------------------------------
+    if (mqttMgr.consumeRebootRequest()) {
+        Serial.println("[MQTT] REBOOT requested - restarting.");
+        mqttMgr.prepareForReboot();   // clean DISCONNECT: no LWT, status stays "rebooting"
+        delay(300);                   // flush serial + let the DISCONNECT go out
+        ESP.restart();
     }
 
     // ------------------------------------------------------------------

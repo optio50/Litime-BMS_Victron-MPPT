@@ -8,10 +8,14 @@
 MQTTManager::MQTTManager()
     : _mqtt(_wifiClient) {}
 
+MQTTManager* MQTTManager::s_instance = nullptr;
+
 // ---------------------------------------------------------------------------
 void MQTTManager::begin() {
     _mqtt.setServer(MQTT_BROKER, MQTT_PORT);
     _mqtt.setBufferSize(1024);
+    s_instance = this;
+    _mqtt.setCallback(_onMessageStatic);
     _reconnect();
 }
 
@@ -46,10 +50,75 @@ bool MQTTManager::_reconnect() {
     if (ok) {
         Serial.println("[MQTT] Connected.");
         _mqtt.publish(lwtTopic, "online", true);
+
+        // Announce our IP (retained) so the dashboard can build the OTA
+        // update URL http://<ip>/update without any hardcoded address.
+        // Retained = the dashboard also gets it on (re)subscribe, not just
+        // at the moment we publish it.
+        char ipTopic[64];
+        snprintf(ipTopic, sizeof(ipTopic), "%s/ip", MQTT_TOPIC_BASE);
+        _mqtt.publish(ipTopic, WiFi.localIP().toString().c_str(), true);
+
+        // Command topic (dashboard "Reboot ESP32" button / mosquitto_pub).
+        // QoS 1 so a "REBOOT" sent while we briefly offline still arrives.
+        char cmdTopic[64];
+        snprintf(cmdTopic, sizeof(cmdTopic), "%s/cmd", MQTT_TOPIC_BASE);
+        _mqtt.subscribe(cmdTopic, 1);
     } else {
         Serial.printf("[MQTT] Failed, rc=%d\n", _mqtt.state());
     }
     return ok;
+}
+
+// ---------------------------------------------------------------------------
+//  Incoming command messages (<base>/cmd)
+// ---------------------------------------------------------------------------
+void MQTTManager::_onMessageStatic(char* topic, byte* payload, unsigned int length) {
+    if (s_instance != nullptr)
+        s_instance->_onMessage(topic, payload, length);
+}
+
+void MQTTManager::_onMessage(char* topic, byte* payload, unsigned int length) {
+    char cmdTopic[64];
+    snprintf(cmdTopic, sizeof(cmdTopic), "%s/cmd", MQTT_TOPIC_BASE);
+    if (strcmp(topic, cmdTopic) != 0) return;   // not for us
+
+    // Copy + null-terminate + trim whitespace
+    char msg[32] = {0};
+    unsigned n = (length < sizeof(msg) - 1) ? length : sizeof(msg) - 1;
+    memcpy(msg, payload, n);
+    char* p = msg;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    char* end = p + strlen(p);
+    while (end > p && (end[-1] == ' ' || end[-1] == '\r' || end[-1] == '\n'))
+        *--end = '\0';
+
+    Serial.printf("[MQTT] cmd: \"%s\"\n", p);
+
+    if (strcasecmp(p, "REBOOT") == 0) {
+        // Publish "rebooting" (retained) BEFORE restarting so subscribers see
+        // the reason; the LWT will then flip status to "offline" on drop, and
+        // the fresh boot publishes "online" again.
+        char statusTopic[64];
+        snprintf(statusTopic, sizeof(statusTopic), "%s/status", MQTT_TOPIC_BASE);
+        _mqtt.publish(statusTopic, "rebooting", true);
+        _rebootRequested = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+bool MQTTManager::consumeRebootRequest() {
+    bool r = _rebootRequested;
+    _rebootRequested = false;
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+void MQTTManager::prepareForReboot() {
+    if (_mqtt.connected()) {
+        _mqtt.loop();          // flush any queued writes first
+        _mqtt.disconnect();    // clean DISCONNECT -> broker suppresses the LWT
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -26,3 +26,13 @@ config.h
 
 # Local launcher script (machine-specific, not part of the project)
 start_litime
+
+# Arduino IDE "Export Compiled Binary" output (build/ in the sketch root).
+# The .bin/.elf/.map contain compiled-in WiFi/MQTT credentials and the
+# Victron encryption key, and the rest is USB-flashing machinery (bootloader,
+# partition table, merged factory image) — none of it belongs in git.
+build/
+
+# Ad-hoc pre-change backup copies of the dashboard script (e.g.
+# litime_monitor.py.pre-pv-fill)
+*.pre-*

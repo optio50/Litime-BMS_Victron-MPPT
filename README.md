@@ -71,6 +71,8 @@ dashboard app.
 | MQTT JSON | Full JSON payload per device + flat convenience topics |
 | HA discovery | Auto-creates entities in Home Assistant via MQTT discovery |
 | Watchdog | 60 s hardware WDT recovers the ESP32 from BLE/WiFi hangs |
+| OTA updates | WiFi firmware upload page at `http://<esp-ip>/update` (ElegantOTA) — flash new .bin from a browser, the dashboard, or `curl`; dual-partition rollback means a failed upload can't brick it |
+| MQTT reboot | Publish `REBOOT` to `litime/cmd` (or use the dashboard's Reboot button) to restart the ESP32 remotely |
 | Desktop dashboard | 24-hour live charts (PyQt5 + pyqtgraph/pglive), event log, dark theme |
 
 > **Note on "Time Remaining":** the discharge estimate targets a **10% SOC
@@ -227,6 +229,7 @@ Open **Library Manager** (Ctrl+Shift+I) and install:
 | Adafruit GFX Library | Adafruit | LCD graphics |
 | PubSubClient | Nick O'Leary | MQTT client |
 | ArduinoJson | Benoit Blanchon (v7+) | JSON payloads |
+| **ElegantOTA** | Ayush Sharma (v3+) | WiFi firmware updates (`/update` page) |
 | **wolfssl** | wolfSSL Inc. | AES-128-CTR decryption of Victron BLE data |
 
 ### 3. Configuration
@@ -255,10 +258,53 @@ gitignored so your real credentials/keys never get committed.
 ```
 Board:         XIAO_ESP32S3
 Upload Speed:  921600
-Flash Size:    4MB (32Mb)
-Partition:     Default (3MB APP)
+Flash Size:    8MB (64Mb)
+Partition:     Default with spiffs (3MB APP/1.5MB SPIFFS)   ← board default,
+                OTA-capable (two 3.25 MB app partitions)
 ```
+> **OTA requirement:** the partition scheme must have **two app partitions** —
+> the board's default "Default with spiffs (3MB APP/1.5MB SPIFFS)" does.
+> Schemes whose name contains "No OTA" (e.g. "Maximum APP (7.9MB APP No
+> OTA)") cannot take WiFi firmware updates. If you're on the default scheme,
+> nothing needs to change — the one USB flash below installs the OTA feature
+> itself; afterwards you never need the cable again.
+
 Press **Upload** (the board auto-enters bootloader).
+
+### 5. Updating firmware over WiFi (OTA)
+After the first USB flash, new firmware can be uploaded without the cable:
+
+1. Compile the sketch in Arduino IDE (same board settings — the default
+   "Default with spiffs (3MB APP/1.5MB SPIFFS)" partition is OTA-capable).
+2. **Sketch → Export Compiled Binary** (Ctrl+Alt+S) — produces a `.bin`
+   next to the sketch folder.
+3. Upload it, using whichever is most convenient:
+   - **Dashboard**: **Log ▸ ESP Update** tab → *Choose .bin…* → *Upload firmware*
+     (progress bar included; the ESP's IP is discovered automatically from
+     the retained `litime/ip` MQTT topic and full instructions are shown
+     alongside)
+   - **Browser**: open `http://<esp-ip>/update` and drag the file in
+   - **CLI**: the `curl` command below
+4. The device flashes the **inactive** app partition, verifies it, and
+   reboots into it automatically — a failed or interrupted upload just
+   keeps the old firmware running.
+
+Scriptable, no browser needed (start the OTA session, then stream the file):
+```bash
+curl http://<esp-ip>/ota/start
+curl -F "file=@Litime-BMS_Victron-MPPT.ino.bin" http://<esp-ip>/ota/upload
+```
+
+The upload page can be password-protected via `OTA_PASSWORD` in
+`config.h` (username is always `admin`; empty = no auth).
+
+Rebooting the ESP32 remotely:
+```bash
+mosquitto_pub -h <broker> -t litime/cmd -m REBOOT
+```
+The firmware publishes `rebooting` on `litime/status`, cleanly disconnects,
+and restarts. (The dashboard has a **Reboot ESP32** button that does the
+same.)
 
 ---
 
@@ -410,7 +456,8 @@ python3 litime_monitor.py
 - **Overview** — combined SOC bars, power flow, per-battery summary, MPPT summary strip
 - **Battery 1 / Battery 2** — big V/I/P readout, full statistics panel, 6 inner chart tabs (Power, V&I, Cells, Temps, Cell Δ, Ah Remaining)
 - **MPPT** — MPPT statistics panel (mirrors the battery stats panel) + inner chart tabs (PV Power, Battery Voltage, Battery Current, Yield Today, Charger State)
-- **Log** — running event/timestamped log of state changes and periodic summaries
+- **Log** — running event/timestamped log of state changes and periodic summaries, plus **MQTT Raw** (live topic/payload table) and **ESP Update** sub-tabs
+- **ESP Update** (Log sub-tab) — native OTA firmware upload panel (file picker + progress bar + one-click **Reboot ESP32**) styled like the rest of the app, next to the full how-to-update instructions; uploads go straight to the ESP's `/update` endpoint
 
 ---
 
@@ -475,7 +522,12 @@ victron/yield_today
 
 ### Status / LWT
 ```
-litime/status              "online" / "offline"
+litime/status              "online" / "offline" / "rebooting"
+litime/ip                  "<esp-ip>"   (retained — published on every MQTT
+                                         connect; used by the dashboard to
+                                         build the OTA page URL)
+litime/cmd                 subscribe: "REBOOT"  (publish to it, QoS 1, to
+                                               restart the ESP32)
 ```
 
 ---
