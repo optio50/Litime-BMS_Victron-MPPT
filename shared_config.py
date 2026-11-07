@@ -79,14 +79,24 @@ def _fetch_device_json(host: str, user: str, password: str, timeout: float = 3.0
     return data
 
 
+# Set by load(): None when the device answered, else a short human-readable
+# reason (e.g. "could not reach litime.local"). The dashboard shows it so a
+# fallback to the built-in defaults is never mistaken for real (all-zero) data.
+LOAD_ERROR: str | None = None
+LOAD_HOST: str = "litime.local"
+
+
 def load(config_h_path: str | None = None) -> dict:
     """Return MQTT / naming settings.
 
     `config_h_path` is accepted for backward compatibility and ignored —
     settings now come from the device, not from a compiled header.
     """
+    global LOAD_ERROR, LOAD_HOST
     cfg = dict(DEFAULTS)
     host, user, password = _read_device_target()
+    LOAD_HOST = host
+    LOAD_ERROR = None
     try:
         parsed = _fetch_device_json(host, user, password)
         missing = [k for k in DEFAULTS if k not in parsed]
@@ -98,6 +108,7 @@ def load(config_h_path: str | None = None) -> dict:
             print(f"shared_config: loaded settings from http://{host}/config.json",
                   file=sys.stderr)
     except Exception as e:
+        LOAD_ERROR = f"could not reach the device at {host}"
         print(f"shared_config: could not fetch http://{host}/config.json ({e}); "
               f"using built-in defaults. Edit dashboard_config.ini if the "
               f"device hostname is not {host}.", file=sys.stderr)

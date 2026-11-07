@@ -644,6 +644,7 @@ Key byte offsets in the 104-byte response:
 | Watchdog reset | Battery BLE response stalled; the 60 s WDT will auto-reboot the ESP32 |
 | MPPT never decodes | Confirm Instant Readout is enabled in VictronConnect, MAC address is correct, and the 32-char key was captured via copy/share (not typed by hand) |
 | MPPT "Yield Today" doesn't reset at midnight | This is normal Victron firmware behavior in locations with very long daylight / no true dark period — the MPPT has no RTC and relies on a full day/night voltage cycle to reset the counter. Not a bug in this project. |
+| Dashboard shows all zeros, log says "Settings NOT loaded" | The dashboard could not fetch `/config.json` from the device, so it fell back to placeholder defaults (broker `192.168.1.100`). Check the device is powered and on your network, then **restart the dashboard** (right after a config save the device reboots and `litime.local` takes a few seconds to appear). If `litime.local` still doesn't resolve on your PC (mDNS is off or unsupported, common on some Windows/Android setups), copy `dashboard_config.ini.example` to `dashboard_config.ini` and set `host = <the device's IP address>` (see your router's client list or the `litime/ip` MQTT topic) |
 | Desktop app can't reach the device | Check `dashboard_config.ini` (`host = litime.local`); confirm `http://litime.local/config.json` opens in a browser |
 
 ---

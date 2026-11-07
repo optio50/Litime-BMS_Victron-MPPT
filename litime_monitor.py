@@ -2653,6 +2653,18 @@ class Window(QMainWindow):
 
         self._init_event_tracking()
         self._log(f"App started – connecting to {MQTT_BROKER}:{MQTT_PORT}", C_DIM)
+        if shared_config.LOAD_ERROR:
+            # The device's /config.json could not be fetched, so everything above is
+            # the built-in placeholder defaults (broker 192.168.1.100 etc.), NOT the
+            # user's real settings. Say so loudly instead of showing all-zero data.
+            self._log(f"⚠ Settings NOT loaded: {shared_config.LOAD_ERROR}. Using placeholder "
+                      f"defaults, so no real data will appear. Check the device is on and "
+                      f"reachable, or set its IP in dashboard_config.ini "
+                      f"(see dashboard_config.ini.example), then restart.", C_RED)
+            self.statusBar().showMessage(
+                f"⚠ Can't reach device ({shared_config.LOAD_HOST}) - using placeholder settings. "
+                f"Set host = <device IP> in dashboard_config.ini and restart.")
+            self.statusBar().setStyleSheet(f"background:{C_PANEL}; color:{C_RED}; font-weight:bold;")
 
     # ─────────────────────────────────────────────────────────────────────────
     #  ESP Update tab (Log ▸ ESP Update)
