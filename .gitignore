@@ -20,9 +20,10 @@ other/
 .DS_Store
 venv/
 
-# Local config with real credentials/keys — use config.h.example as template
-# (copy config.h.example to config.h and fill in your values)
-config.h
+# Local config with real credentials/keys — use config.ini.example as template
+# (paste into http://<device>/config after first flash). Hardware-only
+# config.h (pins/colors) IS tracked.
+first-boot-config.ini
 
 # Local launcher script (machine-specific, not part of the project)
 start_litime
@@ -36,3 +37,13 @@ build/
 # Ad-hoc pre-change backup copies of the dashboard script (e.g.
 # litime_monitor.py.pre-pv-fill)
 *.pre-*
+
+# Local settings and secrets - never commit these. Copy the *.example files instead.
+config.ini
+dashboard_config.ini
+first-boot-config.ini
+
+# Compiled firmware images contain the WiFi/MQTT credentials and the Victron key
+*.bin
+*.elf
+*.map

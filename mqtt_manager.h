@@ -5,7 +5,6 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include "config.h"
 #include "LiTime_BMS_Display.h"  // for BatteryData + VictronData
 
 class MQTTManager {

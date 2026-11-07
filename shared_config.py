@@ -1,33 +1,28 @@
 """
 shared_config.py
 =================
-Lets the Python dashboard (litime_monitor.py) read its MQTT / naming
-settings directly out of config.h -- the SAME file the ESP32-S3 firmware
-(LiTime_BMS_Display.ino) is compiled with. That way there is exactly ONE
-file to edit (config.h) when you change the broker address, credentials,
-topic prefix, or battery names; the Python app just parses the relevant
-`#define`s out of it at startup.
+Lets the Python dashboard (litime_monitor.py) read MQTT / naming settings
+from the ESP32 itself — the same /config.ini the firmware uses at runtime.
 
-No firmware changes needed and no build step required -- config.h stays
-plain C and compiles exactly as before. This module simply does a very
-small, forgiving regex parse of the subset of #define lines the Python
-app cares about:
+On launch it:
 
-    MQTT_BROKER, MQTT_PORT, MQTT_USER, MQTT_PASS,
-    MQTT_TOPIC_BASE, BMS1_NAME, BMS2_NAME
+  1. Reads a tiny local dashboard_config.ini  (device hostname + optional
+     Basic-auth credentials for /config.json). Defaults: host=litime.local.
+  2. Fetches http://<host>/config.json from the device.
+  3. Falls back to DEFAULTS (and a warning on stderr) if the device is
+     unreachable, so the app still starts.
 
-Any value it can't find falls back to the DEFAULTS below, so the app
-still runs (with a warning printed to stderr) even if config.h is
-missing, moved, or edited into an unparsable state.
+The dict keys it returns are unchanged from the old config.h parser, so
+litime_monitor.py needs no changes.
 """
 from __future__ import annotations
 
+import json
 import os
-import re
 import sys
+import urllib.request
+from configparser import ConfigParser
 
-# Fallback values used if config.h is missing or a given #define can't be
-# found/parsed -- keeps the app usable even without the shared file.
 DEFAULTS = {
     "MQTT_BROKER":     "192.168.1.100",
     "MQTT_PORT":       1883,
@@ -40,47 +35,70 @@ DEFAULTS = {
     "WEATHER_URL":     "https://www.msn.com/en-us/weather/forecast/in-Phoenix,AZ",
     "SOC_RESERVE_PCT": 10,
     "ARRAY_NAME":       "Solar Array",
+    "OTA_PASSWORD":    "",
+    "HOSTNAME":        "litime",
 }
 
-# Matches:  #define NAME  "quoted string"      -> group('str')
-#           #define NAME  123                  -> group('num')
-_DEFINE_RE = re.compile(
-    r'^\s*#define\s+(?P<name>\w+)\s+'
-    r'(?:"(?P<str>[^"]*)"|(?P<num>-?\d+))',
-    re.MULTILINE,
-)
+
+def _local_ini_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "dashboard_config.ini")
 
 
-def _parse_config_h(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
+def _read_device_target(path: str | None = None) -> tuple[str, str, str]:
+    """Return (host, user, password) from dashboard_config.ini."""
+    host, user, password = "litime.local", "admin", ""
+    cfg = ConfigParser()
+    ini = path or _local_ini_path()
+    if not os.path.isfile(ini):
+        return host, user, password
+    try:
+        cfg.read(ini, encoding="utf-8")
+    except OSError as e:
+        print(f"shared_config: could not read {ini} ({e})", file=sys.stderr)
+        return host, user, password
+    if cfg.has_section("device"):
+        host     = cfg.get("device", "host",     fallback=host).strip() or host
+        user     = cfg.get("device", "user",     fallback=user).strip() or user
+        password = cfg.get("device", "password", fallback=password)
+    return host, user, password
 
-    found = {}
-    for m in _DEFINE_RE.finditer(text):
-        name = m.group("name")
-        if m.group("str") is not None:
-            found[name] = m.group("str")
-        elif m.group("num") is not None:
-            found[name] = int(m.group("num"))
-    return found
+
+def _fetch_device_json(host: str, user: str, password: str, timeout: float = 3.0) -> dict:
+    url = f"http://{host}/config.json"
+    req = urllib.request.Request(url, headers={"User-Agent": "litime-monitor"})
+    if password:
+        import base64
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        req.add_header("Authorization", f"Basic {token}")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("config.json was not a JSON object")
+    return data
 
 
 def load(config_h_path: str | None = None) -> dict:
-    """Return a dict with MQTT_BROKER, MQTT_PORT, MQTT_USER, MQTT_PASS,
-    MQTT_TOPIC_BASE, BMS1_NAME, BMS2_NAME -- read from config.h when
-    possible, falling back to DEFAULTS for anything missing."""
-    if config_h_path is None:
-        config_h_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.h")
+    """Return MQTT / naming settings.
 
+    `config_h_path` is accepted for backward compatibility and ignored —
+    settings now come from the device, not from a compiled header.
+    """
     cfg = dict(DEFAULTS)
+    host, user, password = _read_device_target()
     try:
-        parsed = _parse_config_h(config_h_path)
+        parsed = _fetch_device_json(host, user, password)
         missing = [k for k in DEFAULTS if k not in parsed]
         cfg.update(parsed)
         if missing:
-            print(f"shared_config: {config_h_path} did not define {missing}; "
+            print(f"shared_config: device {host} did not define {missing}; "
                   f"using built-in defaults for those.", file=sys.stderr)
-    except OSError as e:
-        print(f"shared_config: could not read {config_h_path} ({e}); "
-              f"using built-in defaults for everything.", file=sys.stderr)
+        else:
+            print(f"shared_config: loaded settings from http://{host}/config.json",
+                  file=sys.stderr)
+    except Exception as e:
+        print(f"shared_config: could not fetch http://{host}/config.json ({e}); "
+              f"using built-in defaults. Edit dashboard_config.ini if the "
+              f"device hostname is not {host}.", file=sys.stderr)
     return cfg

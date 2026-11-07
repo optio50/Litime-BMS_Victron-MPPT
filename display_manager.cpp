@@ -2,6 +2,7 @@
 //  display_manager.cpp  –  ILI9341 display implementation
 // =============================================================================
 #include "display_manager.h"
+#include "app_config.h"
 #include "LiTime_BMS_Display.h"   // for BatteryData struct
 #include "victron_mppt.h"         // for victronStateStr(), victronErrorStr()
 
@@ -87,7 +88,7 @@ static String _decodeBattState(const String& hex) {
 static uint32_t _calcTimeRem(const BatteryData& b, int8_t& dir) {
     float pwr       = b.totalVoltage * b.current;
     float absI      = fabs(b.current);
-    float reserveAh = b.fullCapacityAh * (SOC_RESERVE_PCT / 100.0f);
+    float reserveAh = b.fullCapacityAh * (appCfg.soc_reserve_pct / 100.0f);
     dir = 0;
     if (absI < 0.1f) return 0;
     if (pwr > 1.0f)  { dir = 1;  float t = b.fullCapacityAh - b.remainingAh; return t > 0 ? (uint32_t)((t / absI) * 3600.0f) : 0; }
@@ -327,7 +328,7 @@ void DisplayManager::_pageOverview(const BatteryData& b1, const BatteryData& b2)
     float absI          = fabs(totalCurrent);
 
     // Time-remaining with correct direction (discharge target = reserve, not 0%)
-    float reserveAh = totalCapAh * (SOC_RESERVE_PCT / 100.0f);
+    float reserveAh = totalCapAh * (appCfg.soc_reserve_pct / 100.0f);
     uint32_t timeRemSec = 0;
     const char* timeLabel = "Time Rem:";
     if (absI > 0.2f) {

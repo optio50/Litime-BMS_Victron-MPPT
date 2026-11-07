@@ -6,7 +6,7 @@
 #include <WiFi.h>
 #include <esp_task_wdt.h>
 
-#include "config.h"
+#include "app_config.h"
 #include "display_manager.h"   // ILI9341 status line during upload
 
 // Defined in Litime-BMS_Victron-MPPT.ino
@@ -14,9 +14,9 @@ extern DisplayManager display;
 
 // ---------------------------------------------------------------------------
 void OtaManager::begin() {
-    // HTTP auth for the upload page (empty OTA_PASSWORD in config.h = none)
-    if (strlen(OTA_PASSWORD) > 0) {
-        ElegantOTA.setAuth("admin", OTA_PASSWORD);
+    // HTTP auth for the upload page (empty ota_password in /config = none)
+    if (appCfg.ota_password.length() > 0) {
+        ElegantOTA.setAuth("admin", appCfg.ota_password.c_str());
     }
 
     // Flash to the inactive OTA partition, then reboot into it automatically

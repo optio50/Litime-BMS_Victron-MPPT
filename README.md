@@ -78,8 +78,8 @@ dashboard app.
 > **Note on "Time Remaining":** the discharge estimate targets a **10% SOC
 > reserve**, not literal 0%. LiFePO4 packs shouldn't routinely be run past
 > that point, and the BMS's voltage-based low-cutoff can trip before true 0%
-> Ah is reached anyway. This threshold is configurable via `SOC_RESERVE_PCT`
-> in `config.h`. "Time to full" while charging is unaffected and still
+> Ah is reached anyway. This threshold is configurable via `soc_reserve_pct`
+> on the device's `/config` page. "Time to full" while charging is unaffected and still
 > targets 100%.
 
 > **Note on PV Voltage:** the Victron BLE advertising broadcast used by this
@@ -145,16 +145,20 @@ If you're replicating this setup:
 ## Repository Layout
 
 ```
-LiTime_BMS_Display.ino     Main Arduino sketch (setup/loop)
+Litime-BMS_Victron-MPPT.ino  Main Arduino sketch (setup/loop)
 LiTime_BMS_Display.h       Shared BatteryData / VictronData structs
-config.h.example          ★ Template — copy to config.h and fill in your values (config.h is gitignored)
-config.h                   Your local config (WiFi, MQTT, BLE MACs, Victron key) — NOT tracked by git
+app_config.cpp/.h          Runtime settings (config.ini on LittleFS flash)
+config_server.cpp/.h       Browser editor at http://<hostname>.local/config
+config.h                   Hardware constants only (TFT pins + color palette)
+config.ini.example         Template of every setting (paste into /config Import)
+dashboard_config.ini.example  Optional template: device hostname for the dashboard
 display_manager.cpp/.h     ILI9341 LCD rendering
 mqtt_manager.cpp/.h        MQTT publishing
 victron_mppt.cpp/.h        Victron BLE passive scan, AES-CTR decrypt, decode
+ota_manager.cpp/.h         ElegantOTA firmware upload at /update
 
 litime_monitor.py          PyQt5 desktop dashboard (reads MQTT, live charts)
-shared_config.py           Lets the desktop app read settings straight out of config.h
+shared_config.py           Fetches settings from the device's /config.json
 requirements.txt           Python dependencies for the desktop app
 icon.jpg                   App icon/logo (used in the desktop dashboard)
 images/                    Screenshots used in this README
@@ -211,13 +215,15 @@ XIAO ESP32-S3
 ## Software Setup (ESP32-S3 Firmware)
 
 ### 1. Install Board Support
-In Arduino IDE → **File → Preferences → Additional Board Manager URLs**:
-```
-https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
-```
-Then **Board Manager** → install **"Seeed XIAO ESP32S3"**.
+In Arduino IDE → **Board Manager** → install **"esp32" by Espressif Systems**
+(tested with **3.3.10**). That package already contains the **XIAO_ESP32S3**
+board definition, so no extra board-manager URL is needed.
 
 Select board: **XIAO_ESP32S3**
+
+> **Sketch folder name:** Arduino requires the folder to have the same name as
+> the main `.ino` file, so keep the cloned folder named `Litime-BMS_Victron-MPPT`
+> (rename it if your clone has another name, e.g. `Litime-BMS_Victron-MPPT-main`).
 
 ### 2. Install Libraries
 Open **Library Manager** (Ctrl+Shift+I) and install:
@@ -232,27 +238,43 @@ Open **Library Manager** (Ctrl+Shift+I) and install:
 | **ElegantOTA** | Ayush Sharma (v3+) | WiFi firmware updates (`/update` page) |
 | **wolfssl** | wolfSSL Inc. | AES-128-CTR decryption of Victron BLE data |
 
+**Versions this firmware was built and tested with** (newer versions usually work, but these are known good):
+
+| Component | Version |
+|---|---|
+| ESP32 Arduino core (`esp32` by Espressif) | 3.3.10 |
+| BMS Client | 1.0.0 |
+| PubSubClient | 2.8 |
+| ArduinoJson | 7.4.3 |
+| ElegantOTA | 3.1.7 |
+| wolfssl | 5.8.4 |
+| Adafruit ILI9341 / Adafruit GFX | 1.6.3 / 1.12.6 |
+
+Board options used: `XIAO_ESP32S3`, USB Mode *Hardware CDC and JTAG*, Flash Size *8MB*,
+Partition Scheme *Default with spiffs (3MB APP/1.5MB SPIFFS)*, PSRAM *Disabled*.
+
 ### 3. Configuration
-Copy the template and fill in your values:
-```bash
-cp config.h.example config.h
-```
-Then edit **`config.h`** — this is the single file with every user-specific
-setting (WiFi, MQTT, battery MACs, Victron MPPT MAC/key). `config.h` is
-gitignored so your real credentials/keys never get committed.
+Settings live **on the device**, not in a compiled header. After the first
+flash (step 4), open `http://litime.local/config` from any browser:
 
-```cpp
-// WiFi
-#define WIFI_SSID      "YourSSID"
-#define WIFI_PASSWORD  "YourPassword"
+- Fill the form (WiFi, MQTT, battery MACs, Victron key, timings, names) **or**
+  paste [`config.ini.example`](config.ini.example) into the Import box.
+- **Save & Reboot.** Changing a setting never requires a rebuild.
 
-// MQTT broker IP
-#define MQTT_BROKER    "192.168.1.100"
+If WiFi isn't configured yet (or the device can't join the network), it
+starts a `litime-setup` access point. Join it from a phone/laptop and open
+`http://192.168.4.1/config`. The page has a WiFi scan dropdown and a
+**Test WiFi** button that associates without saving, so a typo can never
+lock you out.
 
-// LiTime BLE MAC addresses (see "Finding BLE MAC Addresses" below)
-#define BMS1_MAC       "AA:BB:CC:DD:EE:01"
-#define BMS2_MAC       "AA:BB:CC:DD:EE:02"
-```
+The desktop dashboard fetches the same settings from
+`http://litime.local/config.json` on launch (`shared_config.py`). Edit
+`dashboard_config.ini` (copy it from
+[`dashboard_config.ini.example`](dashboard_config.ini.example)) only if the
+hostname isn't `litime.local` or you've set an OTA password.
+
+`config.h` now holds **hardware constants only** (TFT pins + color palette).
+Change it only if you rewire the display.
 
 ### 4. Compile & Flash
 ```
@@ -295,8 +317,8 @@ curl http://<esp-ip>/ota/start
 curl -F "file=@Litime-BMS_Victron-MPPT.ino.bin" http://<esp-ip>/ota/upload
 ```
 
-The upload page can be password-protected via `OTA_PASSWORD` in
-`config.h` (username is always `admin`; empty = no auth).
+The upload page (and `/config`) can be password-protected via
+`ota_password` on the `/config` page (username is always `admin`; empty = no auth).
 
 Rebooting the ESP32 remotely:
 ```bash
@@ -333,14 +355,9 @@ layout used here are based on the excellent work in
    31 of the 32 hex characters on-screen. Don't copy it by hand — instead
    tap the key, then use the **copy / share** dialogue that pops up to
    capture the full, correct 32-character string.
-3. Convert the 32-character hex string into 16 bytes for `config.h`. For
-   example, key string `0011223344556677 8899aabbccddeeff` becomes:
-   ```cpp
-   const uint8_t VICTRON_MPPT_KEY[16] = {
-       0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
-       0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff
-   };
-   ```
+3. Paste the 32-character hex string into the **MPPT AES key** field on
+   `/config` (or `mppt_key = ...` in a pasted `config.ini`). Don't convert
+   it to C bytes — the firmware does that.
 
 ### Step 3 — Get the controller's BLE MAC address
 Use the free **nRF Connect** app (Nordic Semiconductor, iOS/Android) — this
@@ -354,17 +371,19 @@ is the easiest method:
    [Finding BLE MAC Addresses](#finding-ble-mac-addresses-litime--victron)
    below and match by RSSI/proximity or manufacturer data instead.
 
-### Step 4 — Fill in `config.h`
-```cpp
-#define VICTRON_MPPT_NAME     "My Solar Controller"   // cosmetic only
-#define VICTRON_MPPT_ADDRESS  "aa:bb:cc:dd:ee:ff"      // lower-case, from Step 3
-const uint8_t VICTRON_MPPT_KEY[16] = { /* from Step 2 */ };
+### Step 4 — Fill in `/config`
+On the device's config page (or in a pasted `config.ini`):
+
+```
+mppt_name    = My Solar Controller   ; cosmetic only
+mppt_address = aa:bb:cc:dd:ee:ff     ; lower-case, from Step 3
+mppt_key     = 00112233445566778899aabbccddeeff   ; from Step 2
 ```
 
 ### How it works (for the curious)
 `victron_mppt.cpp` runs a repeating passive BLE scan looking for any
 advertisement carrying Victron's company ID (`0x02E1`). For the packet
-matching `VICTRON_MPPT_ADDRESS`, it:
+matching the configured `mppt_address`, it:
 1. Extracts the 2-byte IV (nonce) and the encrypted payload from the
    manufacturer-data bytes.
 2. Decrypts the payload with **AES-128-CTR** (via wolfSSL) using your key.
@@ -420,8 +439,9 @@ firmware publishes, showing live values plus 24-hour rolling charts.
 
 > ### 📈 Powered by pglive
 > The smooth, genuinely real-time charts throughout this dashboard (Power,
-> Voltage & Current, Cell voltages, Temperatures, Cell Delta, Ah Remaining,
-> PV Power, Yield, and the Charger State timeline) are all built on
+> Voltage & Current, Temperatures, Cell Delta, Ah Remaining, per-cell
+> voltage history, PV Power, Yield, and the Charger State timeline) are all
+> built on
 > **[pglive](https://github.com/domarm-comat/pglive)**, layered on top of
 > **[pyqtgraph](https://github.com/pyqtgraph/pyqtgraph)**. pglive's
 > `DataConnector` model made it trivial to get thread-safe, continuously
@@ -437,15 +457,15 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Dependencies (`requirements.txt`): `PyQt5`, `pyqtgraph`, `pglive`, `paho-mqtt`.
+Dependencies (`requirements.txt`): `PyQt5`, `PyQtWebEngine`, `pyqtgraph`, `pglive`, `numpy`, `paho-mqtt`.
 
 ### Configure
-The dashboard reads its MQTT broker address, port, credentials, and battery
-names directly out of the firmware's `config.h` (via `shared_config.py`) —
-**edit `config.h` once and both the firmware and the desktop app pick it
-up**. No separate Python config file needed. If `config.h` can't be found or
-parsed (e.g. you haven't copied `config.h.example` yet), the app falls back
-to safe defaults and prints a warning.
+The dashboard fetches MQTT broker, credentials, and battery names from the
+ESP32 (`http://litime.local/config.json` via `shared_config.py`) —
+**edit settings once on `/config` and both the firmware and the desktop app
+pick them up**. If the device is unreachable, the app falls back to safe
+defaults and prints a warning. Override the hostname in
+`dashboard_config.ini` (see `dashboard_config.ini.example`) if it isn't `litime.local`.
 
 ### Run
 ```bash
@@ -454,7 +474,7 @@ python3 litime_monitor.py
 
 ### Tabs
 - **Overview** — combined SOC bars, power flow, per-battery summary, MPPT summary strip
-- **Battery 1 / Battery 2** — big V/I/P readout, full statistics panel, 6 inner chart tabs (Power, V&I, Cells, Temps, Cell Δ, Ah Remaining)
+- **Battery 1 / Battery 2** — big V/I/P readout, full statistics panel, 7 inner chart tabs (Power, V&I, Now, Temps, Cell Δ, Ah Remaining, Cell Voltages). **Now** is the live 16-cell snapshot (colored by deviation from the pack average); **Cell Voltages** is the 24-hour per-cell history.
 - **MPPT** — MPPT statistics panel (mirrors the battery stats panel) + inner chart tabs (PV Power, Battery Voltage, Battery Current, Yield Today, Charger State)
 - **Log** — running event/timestamped log of state changes and periodic summaries, plus **MQTT Raw** (live topic/payload table) and **ESP Update** sub-tabs
 - **ESP Update** (Log sub-tab) — native OTA firmware upload panel (file picker + progress bar + one-click **Reboot ESP32**) styled like the rest of the app, next to the full how-to-update instructions; uploads go straight to the ESP's `/update` endpoint
@@ -567,8 +587,8 @@ including:
    ```
 2. Copy [`homeassistant/mqtt_sensors.yaml`](homeassistant/mqtt_sensors.yaml)
    into `<ha-config>/packages/litime_victron_mqtt.yaml`.
-3. If you changed `MQTT_TOPIC_BASE` / `MQTT_VICTRON_TOPIC_BASE` from the
-   defaults (`litime` / `victron`) in `config.h`, update the topic strings
+3. If you changed `topic_base` / `victron_topic_base` from the
+   defaults (`litime` / `victron`) on `/config`, update the topic strings
    in the copied file to match.
 4. **Developer Tools → YAML → Check Configuration**, then **Restart**.
 
@@ -616,7 +636,7 @@ Key byte offsets in the 104-byte response:
 
 | Symptom | Fix |
 |---|---|
-| "BLE: FAILED" on boot | Check MAC address in config.h; ensure battery is powered on; move closer |
+| "BLE: FAILED" on boot | Check MAC address on `/config`; ensure battery is powered on; move closer |
 | Only one battery connects | BLE on ESP32 supports multiple connections but range/interference matters; try staggered `init()` with a delay |
 | Display blank / white | Check SPI wiring; verify TFT_CS, TFT_DC, TFT_RST pin assignments |
 | MQTT not connecting | Verify broker IP; check firewall; test with `mosquitto_sub -t '#'` |
@@ -624,7 +644,7 @@ Key byte offsets in the 104-byte response:
 | Watchdog reset | Battery BLE response stalled; the 60 s WDT will auto-reboot the ESP32 |
 | MPPT never decodes | Confirm Instant Readout is enabled in VictronConnect, MAC address is correct, and the 32-char key was captured via copy/share (not typed by hand) |
 | MPPT "Yield Today" doesn't reset at midnight | This is normal Victron firmware behavior in locations with very long daylight / no true dark period — the MPPT has no RTC and relies on a full day/night voltage cycle to reset the counter. Not a bug in this project. |
-| Desktop app can't find config.h | Run `litime_monitor.py` from the repo folder, or check the warning printed to stderr for the path it tried |
+| Desktop app can't reach the device | Check `dashboard_config.ini` (`host = litime.local`); confirm `http://litime.local/config.json` opens in a browser |
 
 ---
 

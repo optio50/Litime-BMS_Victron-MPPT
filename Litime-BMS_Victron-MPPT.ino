@@ -13,21 +13,27 @@
 //    • PubSubClient        (Nick O'Leary)
 //    • ArduinoJson         (Benoit Blanchon) v7+
 //    • ElegantOTA          (Ayush Sharma)  – WiFi firmware updates at /update
+//    Settings live on the device (http://<hostname>.local/config) — no
+//    compile-time credentials. First boot starts a "litime-setup" AP if
+//    WiFi isn't configured yet.
 //
 //  Board: "XIAO_ESP32S3"  (Seeed XIAO ESP32S3 in Arduino boards manager)
 // =============================================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
+#include <DNSServer.h>
 #include <esp_task_wdt.h>
 #include <BMSClient.h>
 
-#include "config.h"
+#include "app_config.h"       // appCfg - runtime settings from /config.ini
 #include "LiTime_BMS_Display.h"
 #include "display_manager.h"
 #include "mqtt_manager.h"
 #include "victron_mppt.h"
 #include "ota_manager.h"
+#include "config_server.h"    // /config web page (same server as /update)
 
 // ---------------------------------------------------------------------------
 //  Globals
@@ -39,6 +45,16 @@ MQTTManager   mqttMgr;
 OtaManager    otaMgr;
 VictronMPPT   victronMppt;
 VictronData   mpptData;
+ConfigServer  configSrv;
+
+// Captive-portal DNS server - only running while the litime-setup fallback
+// access point is active (boot-time WiFi connect failed).
+DNSServer     dnsServer;
+
+// MQTT started flag - begin() may be deferred (no broker configured yet,
+// or waiting for STA recovery after a setup-AP session).
+bool          mqttStarted = false;
+
 
 // Timing
 unsigned long lastBmsUpdateMs    = 0;
@@ -102,17 +118,29 @@ static void copyBmsData(BMSClient& src, BatteryData& dst) {
 }
 
 // ---------------------------------------------------------------------------
-//  Connect to WiFi with timeout
+//  Connect to WiFi with timeout (credentials from appCfg / flash config)
 // ---------------------------------------------------------------------------
 static bool connectWiFi() {
-    Serial.printf("[WiFi] Connecting to %s\n", WIFI_SSID);
+    if (appCfg.wifi_ssid.length() == 0) {
+        Serial.println("[WiFi] No credentials configured - starting setup AP.");
+        return false;
+    }
+    Serial.printf("[WiFi] Connecting to \"%s\" (pass %u chars)\n",
+                  appCfg.wifi_ssid.c_str(), (unsigned)appCfg.wifi_password.length());
+    // Same radio path as Test WiFi (which succeeds): don't WIFI_OFF, don't
+    // wipe NVS. Just STA + begin. Aggressive teardown was leaving the radio
+    // unable to associate after reboot even with good credentials.
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.setAutoReconnect(true);
+    WiFi.setHostname(appCfg.hostname.c_str());
+    WiFi.begin(appCfg.wifi_ssid.c_str(), appCfg.wifi_password.c_str());
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED) {
-        if (millis() - start > 20000) {
-            Serial.println("[WiFi] Timeout.");
+        esp_task_wdt_reset();
+        if (millis() - start > 25000) {
+            Serial.printf("[WiFi] Timeout. status=%d\n", (int)WiFi.status());
             return false;
         }
         delay(500);
@@ -121,6 +149,45 @@ static bool connectWiFi() {
     Serial.printf("\n[WiFi] Connected. IP: %s\n", WiFi.localIP().toString().c_str());
     return true;
 }
+
+// ---------------------------------------------------------------------------
+//  Start mDNS so the device is reachable at http://<hostname>.local
+//  (also what litime_monitor.py uses to fetch /config.json)
+// ---------------------------------------------------------------------------
+static void startMdns() {
+    if (MDNS.begin(appCfg.hostname.c_str())) {
+        MDNS.addService("http", "tcp", 80);
+        Serial.printf("[WiFi] mDNS ready: http://%s.local\n", appCfg.hostname.c_str());
+    } else {
+        Serial.println("[WiFi] mDNS begin FAILED");
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Boot-time WiFi failed (or never configured): start the "litime-setup"
+//  fallback access point so credentials can be fixed from ANY browser.
+//  WIFI_AP only (not AP_STA): a phone joining the AP must not look like
+//  STA recovery, and we must not background-retry STA (that drops AP
+//  clients). The AP stays up until /config Save & Reboot.
+// ---------------------------------------------------------------------------
+static void startFallbackAp() {
+    WiFi.disconnect(true, true);
+    delay(100);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("litime-setup");
+    // Captive DNS so the phone pops the config page after it joins.
+    // DNS itself is async and cheap; the web server is what must not be
+    // hammered during the join (see the delay in loop()).
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+    dnsServer.setTTL(1);
+    dnsServer.start(53, "*", WiFi.softAPIP());
+    g_apFallbackActive = true;
+    display.showScanStatus("SETUP AP  litime-setup  192.168.4.1");
+    Serial.printf("[WiFi] Setup AP active: litime-setup  ->  http://%s/config\n",
+                  WiFi.softAPIP().toString().c_str());
+    Serial.println("[WiFi] AP will stay up until you Save WiFi on /config.");
+}
+
 
 // ---------------------------------------------------------------------------
 //  Try to connect a single BMSClient with status feedback on display
@@ -135,7 +202,8 @@ static void connectBMS(BMSClient& bms, BatteryData& data, const char* mac,
     bms.init(mac);
     unsigned long t = millis();
     bool ok = false;
-    while (!ok && (millis() - t < BLE_SCAN_TIMEOUT_MS)) {
+    while (!ok && (millis() - t < appCfg.ble_scan_timeout_ms)) {
+        esp_task_wdt_reset();
         ok = bms.connect();
         if (!ok) delay(1000);
     }
@@ -211,6 +279,12 @@ void setup() {
     delay(1000);
     Serial.println("\n=== LiTime Dual BMS Monitor ===");
 
+    WiFi.persistent(false);   // never store creds in NVS - config.ini is source of truth
+
+    // Load settings BEFORE the watchdog: first-boot LittleFS format of the
+    // 1.5 MB partition can take several seconds.
+    appConfigLoad();
+
     // Watchdog
     esp_task_wdt_config_t wdt_cfg = {
         .timeout_ms  = (uint32_t)WDT_TIMEOUT_S * 1000,
@@ -225,29 +299,75 @@ void setup() {
 
     // Display
     display.begin();
-    delay(800);
+    delay(200);
 
     // WiFi
     display.showScanStatus("WiFi: connecting...");
     bool wifiOk = connectWiFi();
-    if (wifiOk) {
+    if (!wifiOk) startFallbackAp();   // fixable from a browser at 192.168.4.1/config
+
+    if (wifiOk && appCfg.mqtt_broker.length() > 0) {
         display.showScanStatus("WiFi: connected. Starting MQTT...");
         delay(500);
         mqttMgr.begin();
-        otaMgr.begin();   // OTA update page: http://<this-ip>/update
-    } else {
-        display.showScanStatus("WiFi: FAILED. MQTT disabled.");
-        delay(2000);
+        mqttStarted = true;
+    } else if (wifiOk) {
+        Serial.println("[MQTT] No broker configured - MQTT disabled "
+                        "(set it at /config).");
+    }
+
+    // Web server: OTA update page + config page, on one server (port 80).
+    // Always started - even in setup-AP mode - so anything can be fixed or
+    // updated from a browser without ever needing USB again.
+    otaMgr.begin();                      // http://<this-ip>/update
+    configSrv.begin(otaMgr.server());     // http://<this-ip>/config
+
+    if (wifiOk) startMdns();
+
+    // WiFi-only until the rest of the config exists. Phone-first-boot only
+    // sets WiFi; BLE/MQTT/watchdog would reboot while waiting for the
+    // computer to finish /config. Stay online and serve /config + /update.
+    bool wifiOnly = wifiOk &&
+                    appCfg.mqtt_broker.length() == 0 &&
+                    appCfg.bms1_mac.length() == 0 &&
+                    appCfg.bms2_mac.length() == 0;
+
+    if (g_apFallbackActive || wifiOnly) {
+        if (wifiOnly) {
+            String ipMsg = "WiFi OK  finish config at http://";
+            ipMsg += WiFi.localIP().toString();
+            ipMsg += "/config";
+            display.showScanStatus(ipMsg.c_str());
+            Serial.printf("[INIT] WiFi-only. Open http://%s/config or http://%s.local/config\n",
+                          WiFi.localIP().toString().c_str(),
+                          appCfg.hostname.c_str());
+        } else {
+            display.showScanStatus("SETUP AP  join litime-setup  192.168.4.1/config");
+            Serial.println("[INIT] Setup-AP mode - BLE/MQTT skipped. "
+                           "Open http://192.168.4.1/config");
+        }
+        lastWifiOkMs = lastBms1OkMs = lastBms2OkMs = lastMpptOkMs = millis();
+        return;
     }
 
     // BLE – connect to Battery 1
-    connectBMS(bms1, bat1, BMS1_MAC, BMS1_NAME);
+    if (appCfg.bms1_mac.length() > 0) {
+        connectBMS(bms1, bat1, appCfg.bms1_mac.c_str(), appCfg.bms1_name.c_str());
+    } else {
+        Serial.println("[BLE] Battery 1: no MAC configured - disabled.");
+        display.showScanStatus("BMS1: no MAC (see /config)");
+    }
 
     // Give the BLE stack time to fully settle before opening the second connection
     delay(3000);
 
     // BLE – connect to Battery 2
-    connectBMS(bms2, bat2, BMS2_MAC, BMS2_NAME);
+    if (appCfg.bms2_mac.length() > 0) {
+        connectBMS(bms2, bat2, appCfg.bms2_mac.c_str(), appCfg.bms2_name.c_str());
+    } else {
+        Serial.println("[BLE] Battery 2: no MAC configured - disabled.");
+        display.showScanStatus("BMS2: no MAC (see /config)");
+    }
 
     // Initial data fetch – give a moment for BLE notify data to arrive
     delay(2500);
@@ -294,14 +414,50 @@ void loop() {
     // 1. Reconnect WiFi / MQTT if needed
     // ------------------------------------------------------------------
     if (WiFi.status() != WL_CONNECTED) {
-        WiFi.reconnect();
-        delay(500);
-    } else {
-        mqttMgr.loop();
+        if (!g_apFallbackActive && appCfg.wifi_ssid.length() > 0)
+            WiFi.reconnect();
+        delay(50);
+    } else if (!g_apFallbackActive) {
+        if (!mqttStarted && appCfg.mqtt_broker.length() > 0) {
+            mqttMgr.begin();
+            mqttStarted = true;
+        }
+        if (mqttStarted) mqttMgr.loop();
+    }
+
+    if (g_apFallbackActive) {
+        // Give the phone a few seconds to finish joining before the web
+        // server answers anything. Instant captive-portal probes were
+        // panicking the ESP (InstrFetchProhibited) on AP connect.
+        static bool webReady = false;
+        static unsigned long apUpMs = 0;
+        if (apUpMs == 0) apUpMs = now;
+        if (!webReady && (now - apUpMs) > 8000) webReady = true;
+        if (webReady) otaMgr.handle();
+        if (configSrv.consumeRebootRequest()) {
+            Serial.println("[CFG] Settings saved - restarting to apply.");
+            delay(800);
+            ESP.restart();
+        }
+        return;
+    }
+
+    // WiFi is up but the rest of config isn't: keep /config reachable,
+    // don't hunt BLE, don't watchdog-reboot.
+    if (appCfg.mqtt_broker.length() == 0 &&
+        appCfg.bms1_mac.length() == 0 &&
+        appCfg.bms2_mac.length() == 0) {
+        otaMgr.handle();
+        if (configSrv.consumeRebootRequest()) {
+            Serial.println("[CFG] Settings saved - restarting to apply.");
+            delay(800);
+            ESP.restart();
+        }
+        return;
     }
 
     // ------------------------------------------------------------------
-    // 1b. OTA web server (http://<ip>/update)
+    // 1b. OTA + config web server (http://<ip>/update and /config)
     // ------------------------------------------------------------------
     otaMgr.handle();
 
@@ -312,6 +468,13 @@ void loop() {
         // spurious reboot. (Successful uploads reboot inside ElegantOTA
         // before ever reaching here.)
         lastWifiOkMs = lastBms1OkMs = lastBms2OkMs = lastMpptOkMs = now;
+    }
+
+    if (configSrv.consumeRebootRequest()) {
+        Serial.println("[CFG] Settings saved - restarting to apply.");
+        if (mqttStarted) mqttMgr.prepareForReboot();
+        delay(400);   // let the HTTP response flush
+        ESP.restart();
     }
 
     // ------------------------------------------------------------------
@@ -327,24 +490,28 @@ void loop() {
     // ------------------------------------------------------------------
     // 2. Poll BMS (alternating between the two each interval)
     // ------------------------------------------------------------------
-    if (now - lastBmsUpdateMs >= BMS_UPDATE_MS) {
+    if (now - lastBmsUpdateMs >= appCfg.bms_update_ms) {
         lastBmsUpdateMs = now;
 
         if (bmsRound == 0) {
             // Battery 1
-            reconnectBmsIfNeeded(0, bms1, bat1, BMS1_MAC, BMS1_NAME);
-            if (bms1.isConnected()) {
-                bms1.update();
-                delay(400);  // allow notification to arrive
-                copyBmsData(bms1, bat1);
+            if (appCfg.bms1_mac.length() > 0) {
+                reconnectBmsIfNeeded(0, bms1, bat1, appCfg.bms1_mac.c_str(), appCfg.bms1_name.c_str());
+                if (bms1.isConnected()) {
+                    bms1.update();
+                    delay(400);  // allow notification to arrive
+                    copyBmsData(bms1, bat1);
+                }
             }
         } else {
             // Battery 2
-            reconnectBmsIfNeeded(1, bms2, bat2, BMS2_MAC, BMS2_NAME);
-            if (bms2.isConnected()) {
-                bms2.update();
-                delay(400);
-                copyBmsData(bms2, bat2);
+            if (appCfg.bms2_mac.length() > 0) {
+                reconnectBmsIfNeeded(1, bms2, bat2, appCfg.bms2_mac.c_str(), appCfg.bms2_name.c_str());
+                if (bms2.isConnected()) {
+                    bms2.update();
+                    delay(400);
+                    copyBmsData(bms2, bat2);
+                }
             }
         }
         bmsRound ^= 1;  // toggle 0/1
@@ -356,8 +523,8 @@ void loop() {
     {
         uint8_t curP = display.currentPage();
         unsigned long dwell = (curP == PAGE_OVERVIEW)
-                              ? (unsigned long)SCREEN_OVERVIEW_S * 1000UL
-                              : (unsigned long)SCREEN_OTHER_S    * 1000UL;
+                              ? appCfg.screen_overview_s * 1000UL
+                              : appCfg.screen_other_s    * 1000UL;
         if (now - lastPageCycle >= dwell) {
             lastPageCycle = now;
             display.nextPage(bat1, bat2, mpptData);
@@ -384,10 +551,10 @@ void loop() {
     // ------------------------------------------------------------------
     unsigned long dataAge1 = (bat1.lastUpdateMs > 0) ? now - bat1.lastUpdateMs : 99999UL;
     unsigned long dataAge2 = (bat2.lastUpdateMs > 0) ? now - bat2.lastUpdateMs : 99999UL;
-    bool freshData = (dataAge1 < (BMS_UPDATE_MS + 600UL)) ||
-                     (dataAge2 < (BMS_UPDATE_MS + 600UL));
+    bool freshData = (dataAge1 < (appCfg.bms_update_ms + 600UL)) ||
+                     (dataAge2 < (appCfg.bms_update_ms + 600UL));
 
-    if (freshData && (now - lastDisplayRefresh >= BMS_UPDATE_MS)) {
+    if (freshData && (now - lastDisplayRefresh >= appCfg.bms_update_ms)) {
         lastDisplayRefresh = now;
         display.showPage(display.currentPage(), bat1, bat2, mpptData);
     }
@@ -395,7 +562,7 @@ void loop() {
     // ------------------------------------------------------------------
     // 6. Publish to MQTT
     // ------------------------------------------------------------------
-    if (now - lastMqttPublish >= MQTT_PUBLISH_MS) {
+    if (now - lastMqttPublish >= appCfg.mqtt_publish_ms) {
         lastMqttPublish = now;
         if (mqttMgr.isConnected()) {
             mqttMgr.publishAll(bat1, bat2);
@@ -413,32 +580,35 @@ void loop() {
 
     // ------------------------------------------------------------------
     // 8. Component disconnect watchdog
-    //    If ANY component (WiFi, Battery 1 BLE, Battery 2 BLE, or MPPT BLE
-    //    scan) has been disconnected for longer than COMPONENT_TIMEOUT_MS,
-    //    force an ESP32 reboot to reset the BLE/WiFi stack.
+    //    Disabled while the setup AP is up (that's a deliberate "WiFi
+    //    failed" state, not a hang). Otherwise if ANY component has been
+    //    disconnected longer than component_timeout_ms, reboot.
     // ------------------------------------------------------------------
-    if (WiFi.status() == WL_CONNECTED) lastWifiOkMs = now;
-    if (bms1.isConnected())             lastBms1OkMs = now;
-    if (bms2.isConnected())             lastBms2OkMs = now;
-    // MPPT is a passive BLE scan - consider it "OK" if we've received data
-    // within the last 60 seconds (MPPT advertises ~every 5s).
-    if (mpptData.valid && (now - mpptData.last_update_ms < 60000UL)) lastMpptOkMs = now;
+    if (g_apFallbackActive) {
+        lastWifiOkMs = lastBms1OkMs = lastBms2OkMs = lastMpptOkMs = now;
+    } else {
+        if (WiFi.status() == WL_CONNECTED) lastWifiOkMs = now;
+        if (appCfg.bms1_mac.length() == 0 || bms1.isConnected()) lastBms1OkMs = now;
+        if (appCfg.bms2_mac.length() == 0 || bms2.isConnected()) lastBms2OkMs = now;
+        if (appCfg.victron_mppt_address.length() == 0 ||
+            (mpptData.valid && (now - mpptData.last_update_ms < 60000UL))) lastMpptOkMs = now;
+    }
 
     unsigned long wifiDown = now - lastWifiOkMs;
     unsigned long b1Down   = now - lastBms1OkMs;
     unsigned long b2Down   = now - lastBms2OkMs;
     unsigned long mpptDown = now - lastMpptOkMs;
 
-    if (wifiDown > (unsigned long)COMPONENT_TIMEOUT_MS ||
-        b1Down   > (unsigned long)COMPONENT_TIMEOUT_MS ||
-        b2Down   > (unsigned long)COMPONENT_TIMEOUT_MS ||
-        mpptDown > (unsigned long)COMPONENT_TIMEOUT_MS) {
+    if (wifiDown > appCfg.component_timeout_ms ||
+        b1Down   > appCfg.component_timeout_ms ||
+        b2Down   > appCfg.component_timeout_ms ||
+        mpptDown > appCfg.component_timeout_ms) {
 
         Serial.println("[WDT] Component disconnect timeout! Forcing reboot:");
         Serial.printf("  WiFi down: %lus  B1 down: %lus  B2 down: %lus  MPPT down: %lus\n",
                       wifiDown / 1000UL, b1Down / 1000UL,
                       b2Down / 1000UL, mpptDown / 1000UL);
-        Serial.printf("  Threshold: %lus\n", (unsigned long)(COMPONENT_TIMEOUT_MS / 1000UL));
+        Serial.printf("  Threshold: %lus\n", appCfg.component_timeout_ms / 1000UL);
 
         // Give the serial output time to flush before rebooting
         delay(200);

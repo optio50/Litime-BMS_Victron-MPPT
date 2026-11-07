@@ -2,6 +2,7 @@
 //  mqtt_manager.cpp  –  MQTT publishing implementation
 // =============================================================================
 #include "mqtt_manager.h"
+#include "app_config.h"
 #include "LiTime_BMS_Display.h"  // for BatteryData
 #include "victron_mppt.h"        // for VictronData + victronStateStr/victronErrorStr + VictronScanResult
 
@@ -12,7 +13,7 @@ MQTTManager* MQTTManager::s_instance = nullptr;
 
 // ---------------------------------------------------------------------------
 void MQTTManager::begin() {
-    _mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+    _mqtt.setServer(appCfg.mqtt_broker.c_str(), appCfg.mqtt_port);
     _mqtt.setBufferSize(1024);
     s_instance = this;
     _mqtt.setCallback(_onMessageStatic);
@@ -37,15 +38,15 @@ bool MQTTManager::isConnected() {
 bool MQTTManager::_reconnect() {
     if (_mqtt.connected()) return true;
     Serial.print("[MQTT] Connecting to ");
-    Serial.println(MQTT_BROKER);
+    Serial.println(appCfg.mqtt_broker.c_str());
 
-    const char* user = (strlen(MQTT_USER) > 0) ? MQTT_USER : nullptr;
-    const char* pass = (strlen(MQTT_PASS) > 0) ? MQTT_PASS : nullptr;
+    const char* user = (appCfg.mqtt_user.length() > 0) ? appCfg.mqtt_user.c_str() : nullptr;
+    const char* pass = (appCfg.mqtt_pass.length() > 0) ? appCfg.mqtt_pass.c_str() : nullptr;
 
     char lwtTopic[64];
-    snprintf(lwtTopic, sizeof(lwtTopic), "%s/status", MQTT_TOPIC_BASE);
+    snprintf(lwtTopic, sizeof(lwtTopic), "%s/status", appCfg.mqtt_topic_base.c_str());
 
-    bool ok = _mqtt.connect(MQTT_CLIENT_ID, user, pass,
+    bool ok = _mqtt.connect(appCfg.mqtt_client_id.c_str(), user, pass,
                             lwtTopic, 1, true, "offline");
     if (ok) {
         Serial.println("[MQTT] Connected.");
@@ -56,13 +57,13 @@ bool MQTTManager::_reconnect() {
         // Retained = the dashboard also gets it on (re)subscribe, not just
         // at the moment we publish it.
         char ipTopic[64];
-        snprintf(ipTopic, sizeof(ipTopic), "%s/ip", MQTT_TOPIC_BASE);
+        snprintf(ipTopic, sizeof(ipTopic), "%s/ip", appCfg.mqtt_topic_base.c_str());
         _mqtt.publish(ipTopic, WiFi.localIP().toString().c_str(), true);
 
         // Command topic (dashboard "Reboot ESP32" button / mosquitto_pub).
         // QoS 1 so a "REBOOT" sent while we briefly offline still arrives.
         char cmdTopic[64];
-        snprintf(cmdTopic, sizeof(cmdTopic), "%s/cmd", MQTT_TOPIC_BASE);
+        snprintf(cmdTopic, sizeof(cmdTopic), "%s/cmd", appCfg.mqtt_topic_base.c_str());
         _mqtt.subscribe(cmdTopic, 1);
     } else {
         Serial.printf("[MQTT] Failed, rc=%d\n", _mqtt.state());
@@ -80,7 +81,7 @@ void MQTTManager::_onMessageStatic(char* topic, byte* payload, unsigned int leng
 
 void MQTTManager::_onMessage(char* topic, byte* payload, unsigned int length) {
     char cmdTopic[64];
-    snprintf(cmdTopic, sizeof(cmdTopic), "%s/cmd", MQTT_TOPIC_BASE);
+    snprintf(cmdTopic, sizeof(cmdTopic), "%s/cmd", appCfg.mqtt_topic_base.c_str());
     if (strcmp(topic, cmdTopic) != 0) return;   // not for us
 
     // Copy + null-terminate + trim whitespace
@@ -100,7 +101,7 @@ void MQTTManager::_onMessage(char* topic, byte* payload, unsigned int length) {
         // the reason; the LWT will then flip status to "offline" on drop, and
         // the fresh boot publishes "online" again.
         char statusTopic[64];
-        snprintf(statusTopic, sizeof(statusTopic), "%s/status", MQTT_TOPIC_BASE);
+        snprintf(statusTopic, sizeof(statusTopic), "%s/status", appCfg.mqtt_topic_base.c_str());
         _mqtt.publish(statusTopic, "rebooting", true);
         _rebootRequested = true;
     }
@@ -126,10 +127,10 @@ void MQTTManager::publishAll(const BatteryData& b1, const BatteryData& b2) {
     if (!_mqtt.connected()) return;
 
     char prefix[48];
-    snprintf(prefix, sizeof(prefix), "%s/battery1", MQTT_TOPIC_BASE);
+    snprintf(prefix, sizeof(prefix), "%s/battery1", appCfg.mqtt_topic_base.c_str());
     _publishBattery(b1, prefix, 0);
 
-    snprintf(prefix, sizeof(prefix), "%s/battery2", MQTT_TOPIC_BASE);
+    snprintf(prefix, sizeof(prefix), "%s/battery2", appCfg.mqtt_topic_base.c_str());
     _publishBattery(b2, prefix, 1);
 
     _publishCombined(b1, b2);
@@ -164,12 +165,12 @@ void MQTTManager::_publishBattery(const BatteryData& b, const char* prefix, uint
     // Estimated time remaining (seconds) with correct charging/discharging direction
     // Charging    → time to FULL    = (fullAh - remainAh) / I
     // Discharging → time to RESERVE = (remainAh - reserveAh) / |I|
-    //   reserveAh = SOC_RESERVE_PCT% of fullCapacityAh (see config.h) — not
+    //   reserveAh = appCfg.soc_reserve_pct% of fullCapacityAh — not
     //   literal 0%, since LFP packs shouldn't routinely be run past that point.
     // Idle        → 0  (no meaningful estimate)
     float pwr       = b.totalVoltage * b.current;
     float absI      = fabs(b.current);
-    float reserveAh = b.fullCapacityAh * (SOC_RESERVE_PCT / 100.0f);
+    float reserveAh = b.fullCapacityAh * (appCfg.soc_reserve_pct / 100.0f);
     uint32_t timeRemSec = 0;
     const char* timeDir = "idle";
     if (absI > 0.1f) {
@@ -257,8 +258,8 @@ void MQTTManager::_publishCombined(const BatteryData& b1, const BatteryData& b2)
     float absI       = fabs(totalI);
 
     // Time remaining with correct direction (discharge target = reserve, see
-    // per-battery notes above; SOC_RESERVE_PCT applied to the combined pack)
-    float reserveAh = totalCapAh * (SOC_RESERVE_PCT / 100.0f);
+    // per-battery notes above; appCfg.soc_reserve_pct applied to the combined pack)
+    float reserveAh = totalCapAh * (appCfg.soc_reserve_pct / 100.0f);
     uint32_t timeRem = 0;
     const char* timeDir = "idle";
     if (absI > 0.2f) {
@@ -301,7 +302,7 @@ void MQTTManager::_publishCombined(const BatteryData& b1, const BatteryData& b2)
     serializeJson(doc, payload, sizeof(payload));
 
     char topic[64];
-    snprintf(topic, sizeof(topic), "%s/combined/state", MQTT_TOPIC_BASE);
+    snprintf(topic, sizeof(topic), "%s/combined/state", appCfg.mqtt_topic_base.c_str());
     _mqtt.publish(topic, payload, false);
 }
 
@@ -331,29 +332,29 @@ void MQTTManager::publishVictron(const VictronData& v) {
 
     char payload[512];
     serializeJson(doc, payload, sizeof(payload));
-    snprintf(topic, sizeof(topic), "%s/state", MQTT_VICTRON_TOPIC_BASE);
+    snprintf(topic, sizeof(topic), "%s/state", appCfg.mqtt_victron_topic_base.c_str());
     _mqtt.publish(topic, payload, false);
 
     // Flat convenience topics
     if (v.valid) {
         snprintf(val, sizeof(val), "%s", victronStateStr(v.device_state));
-        snprintf(topic, sizeof(topic), "%s/state_str", MQTT_VICTRON_TOPIC_BASE);
+        snprintf(topic, sizeof(topic), "%s/state_str", appCfg.mqtt_victron_topic_base.c_str());
         _mqtt.publish(topic, val, false);
 
         dtostrf(v.batt_v, 5, 2, val);
-        snprintf(topic, sizeof(topic), "%s/batt_v", MQTT_VICTRON_TOPIC_BASE);
+        snprintf(topic, sizeof(topic), "%s/batt_v", appCfg.mqtt_victron_topic_base.c_str());
         _mqtt.publish(topic, val, false);
 
         dtostrf(v.batt_a, 6, 2, val);
-        snprintf(topic, sizeof(topic), "%s/batt_a", MQTT_VICTRON_TOPIC_BASE);
+        snprintf(topic, sizeof(topic), "%s/batt_a", appCfg.mqtt_victron_topic_base.c_str());
         _mqtt.publish(topic, val, false);
 
         dtostrf(v.pv_w, 6, 1, val);
-        snprintf(topic, sizeof(topic), "%s/pv_w", MQTT_VICTRON_TOPIC_BASE);
+        snprintf(topic, sizeof(topic), "%s/pv_w", appCfg.mqtt_victron_topic_base.c_str());
         _mqtt.publish(topic, val, false);
 
         dtostrf(v.yield_today, 7, 3, val);
-        snprintf(topic, sizeof(topic), "%s/yield_today", MQTT_VICTRON_TOPIC_BASE);
+        snprintf(topic, sizeof(topic), "%s/yield_today", appCfg.mqtt_victron_topic_base.c_str());
         _mqtt.publish(topic, val, false);
     }
 }

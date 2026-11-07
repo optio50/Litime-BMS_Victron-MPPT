@@ -1,0 +1,73 @@
+; LiTime Dual BMS Monitor - config.ini
+; Copy these values into the Import box at http://<device>/config
+; (or fill the form field-by-field). Full-line comments only.
+
+[wifi]
+; WiFi network - SSID of your 2.4 GHz WiFi network
+ssid = YOUR_WIFI_SSID
+; WiFi password - WiFi network password
+password = YOUR_WIFI_PASSWORD
+; Hostname - Device name: http://<hostname>.local (letters/digits/dashes only)
+hostname = litime
+
+[mqtt]
+; Broker address - IP or hostname of your MQTT broker (empty = MQTT disabled)
+broker = 192.168.1.100
+; Broker port - MQTT port, usually 1883
+port = 1883
+; MQTT username - Leave empty if the broker has no auth
+user =
+; MQTT password - Leave empty if the broker has no auth
+pass =
+; Client ID - MQTT client id for this device
+client_id = litime-monitor
+; Topic base - Battery topics: <base>/battery1, /battery2, /combined
+topic_base = litime
+; Victron topic base - MPPT topics: <base>/state, /batt_v, /pv_w, ...
+victron_topic_base = victron
+
+[ota]
+; OTA/config password - Password for the /update and /config pages (username: admin). Empty = no auth.
+ota_password =
+
+[batteries]
+; Battery 1 MAC - BLE MAC of battery 1, format AA:BB:CC:DD:EE:FF (empty = disabled)
+bms1_mac = AA:BB:CC:DD:EE:01
+; Battery 2 MAC - BLE MAC of battery 2 (empty = disabled)
+bms2_mac = AA:BB:CC:DD:EE:02
+; Battery 1 name - Display name of battery 1
+bms1_name = Battery 1
+; Battery 2 name - Display name of battery 2
+bms2_name = Battery 2
+
+[victron mppt]
+; MPPT name - Device name as shown in the VictronConnect app
+mppt_name = My Solar Controller
+; MPPT MAC - BLE MAC of the Victron MPPT, lower-case (empty = decryption disabled)
+mppt_address = aa:bb:cc:dd:ee:ff
+; MPPT AES key - 32 hex chars: VictronConnect > Settings > Product Info > Encryption Key
+mppt_key = 00112233445566778899aabbccddeeff
+
+[dashboard]
+; Weather URL - Forecast page URL shown in the dashboard weather tab
+weather_url = https://www.msn.com/en-us/weather/forecast/in-Phoenix,AZ
+; Array name - Solar array label shown in the dashboard overview
+array_name = Solar Array
+
+[display]
+; Overview dwell (s) - Seconds the Overview screen shows before cycling
+overview_s = 15
+; Other screens dwell (s) - Seconds the Battery/Cells screens show before cycling
+other_s = 10
+; SOC reserve % - Time-to-empty targets this SOC %, not literal 0%
+soc_reserve_pct = 10
+
+[timing]
+; BMS poll interval (ms) - How often each battery is polled
+bms_update_ms = 2000
+; MQTT publish interval (ms) - How often data is published to MQTT
+mqtt_publish_ms = 2000
+; BLE connect timeout (ms) - Per-battery boot-time connect timeout
+ble_scan_timeout_ms = 15000
+; Component watchdog (ms) - Any component down this long forces a reboot
+component_timeout_ms = 120000

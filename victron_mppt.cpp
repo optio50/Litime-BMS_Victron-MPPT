@@ -32,7 +32,7 @@
 //  Decryption uses wolfssl (install via Arduino Library Manager: "wolfssl" by wolfSSL Inc.)
 // =============================================================================
 #include "victron_mppt.h"
-#include "config.h"
+#include "app_config.h"
 
 // wolfssl AES-CTR  –  requires wolfssl library installed in Arduino IDE
 #include "wolfssl.h"
@@ -177,7 +177,10 @@ bool VictronMPPT::tick() {
     _scanning = false;
 
     bool decoded = false;
-    String target = VICTRON_MPPT_ADDRESS;
+    if (appCfg.victron_mppt_address.length() == 0) {
+        return false;   // MPPT not configured
+    }
+    String target = appCfg.victron_mppt_address;
     target.toLowerCase();
 
     for (uint8_t i = 0; i < _cb.count(); i++) {
@@ -208,7 +211,7 @@ bool VictronMPPT::tick() {
         }
     } else if (!decoded) {
         Serial.printf("[Victron] Scan found %d Victron device(s) but target MAC %s not matched.\n",
-                      _cb.count(), VICTRON_MPPT_ADDRESS);
+                      _cb.count(), appCfg.victron_mppt_address.c_str());
     }
 
     return decoded;
@@ -256,7 +259,7 @@ bool VictronMPPT::_decrypt(const uint8_t* raw, uint8_t len, uint8_t output[16]) 
     Aes aesDec;
     memset(&aesDec, 0, sizeof(Aes));
     wc_AesInit(&aesDec, NULL, INVALID_DEVID);
-    wc_AesSetKey(&aesDec, VICTRON_MPPT_KEY, 16, iv, AES_ENCRYPTION);
+    wc_AesSetKey(&aesDec, appCfg.victron_mppt_key, 16, iv, AES_ENCRYPTION);
     wc_AesCtrEncrypt(&aesDec, output, cipher, 16);
     wc_AesFree(&aesDec);
 

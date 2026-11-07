@@ -16,6 +16,17 @@ Topics consumed:
     victron/<field>              - flat scalar topics (optional)
 """
 
+import os
+import sys
+
+# If not running inside the project's virtualenv, re-exec with venv Python.
+# This lets ./litime_monitor.py work directly without manual activation.
+if sys.prefix == sys.base_prefix:
+    _venv_python = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'venv', 'bin', 'python')
+    if os.path.exists(_venv_python):
+        os.execv(_venv_python, [_venv_python] + sys.argv)
+
 import base64
 import hashlib
 import sys
@@ -94,10 +105,10 @@ os.putenv("QT_LOGGING_RULES", "*.debug=false;qt.qpa.*=false")
 
 # =============================================================================
 #  ─── CONFIGURATION ──────────────────────────────────────────────────────────
-#  MQTT connection details and battery display names are read from config.h
-#  (the same file the ESP32-S3 firmware is compiled with) via shared_config.py
-#  -- edit config.h once and both apps stay in sync. Anything it can't find
-#  there falls back to shared_config.DEFAULTS.
+#  MQTT connection details and battery display names are fetched from the
+#  ESP32 itself (http://<hostname>.local/config.json) via shared_config.py
+#  -- edit settings once on the device /config page and both apps stay in
+#  sync. Anything it can't fetch falls back to shared_config.DEFAULTS.
 # =============================================================================
 _cfg = shared_config.load()
 
@@ -115,7 +126,7 @@ WEATHER_URL  = _cfg.get("WEATHER_URL", "")
 SOC_RESERVE_PCT = _cfg.get("SOC_RESERVE_PCT", 10)
 ARRAY_NAME   = _cfg.get("ARRAY_NAME", "Solar Array")
 BAT_NAME     = {1: BAT1_NAME, 2: BAT2_NAME}
-# OTA upload-page password (config.h OTA_PASSWORD) — used only to display a
+# OTA upload-page password (device ota_password) — used only to display a
 # hint on the ESP Update tab; the embedded web view itself asks for it.
 OTA_PASSWORD = _cfg.get("OTA_PASSWORD", "")
 
@@ -653,8 +664,8 @@ def fmt_time(seconds, direction="idle") -> str:
     """
     Format time remaining with directional label.
 
-    Note: "to_empty" is actually time-to-RESERVE (SOC_RESERVE_PCT in config.h
-    on the firmware, currently 10%), not literal 0% SOC — LFP packs shouldn't
+    Note: "to_empty" is actually time-to-RESERVE (soc_reserve_pct on /config,
+    currently 10%), not literal 0% SOC — LFP packs shouldn't
     routinely be discharged past that point, and the BMS's voltage-based
     low-cutoff can trip before true 0% Ah is reached anyway.
 
@@ -1040,11 +1051,11 @@ def make_category_chart(title: str, categories: list) -> LivePlotWidget:
 
 
 # =============================================================================
-#  ─── CELL VOLTAGE CHART ──────────────────────────────────────────────────────
+#  ─── LIVE CELL SNAPSHOT ──────────────────────────────────────────────────────
 # =============================================================================
 class CellBarChart(pg.PlotWidget):
-    """Cell voltages as scatter+line colored by deviation from average."""
-    def __init__(self, title: str = "Cell Voltages", n_cells: int = 16):
+    """Instant cell voltages as scatter+line colored by deviation from average."""
+    def __init__(self, title: str = "Cells Now", n_cells: int = 16):
         super().__init__()
         self.n_cells = n_cells
         self.setBackground("#000000")
@@ -1102,12 +1113,14 @@ class BatteryPanel(QWidget):
 
     Layout:
       top row  : SOC progress bar   |  big Voltage / Current / Power labels
-      mid row  : statistics panel   |  inner QTabWidget (5 charts)
+      mid row  : statistics panel   |  inner QTabWidget
                                          1. Power
                                          2. V & I
-                                         3. Cells  (CellBarChart)
+                                         3. Now    (CellBarChart, live snapshot)
                                          4. Temps
                                          5. Cell Δ
+                                         6. Ah Remaining
+                                         7. Cell Voltages (24 hrs)
     """
 
     def __init__(self, bat_id: int):
@@ -1222,11 +1235,11 @@ class BatteryPanel(QWidget):
         vil.addWidget(self.vi_chart)
         chart_tabs.addTab(viw, "V && I")
 
-        # ── Tab 3: Cell voltages ──────────────────────────────────────────
-        self.cell_chart = CellBarChart(f"{name} – Cell Voltages", n_cells=16)
+        # ── Tab 3: Cells now (live snapshot, not the 24 h history) ────────
+        self.cell_chart = CellBarChart(f"{name} – Cells Now", n_cells=16)
         cw = QWidget(); cl = QVBoxLayout(cw); cl.setContentsMargins(0, 0, 0, 0)
         cl.addWidget(self.cell_chart)
-        chart_tabs.addTab(cw, "Cells")
+        chart_tabs.addTab(cw, "Now")
 
         # ── Tab 4: Temperatures ───────────────────────────────────────────
         ct_plot = LiveLinePlot(pen=pg.mkPen(C_ORANGE, width=1.5), name="Cell Temp")
@@ -1982,22 +1995,25 @@ def _esp_help_html(esp_ip: str | None) -> str:
     if esp_ip:
         base = f"http://{esp_ip}"
         ota_url = f"{base}/update"
+        config_url = f"{base}/config"
         curl_cmd = (f"curl {base}/ota/start && "
                     f"curl -F &quot;file=@Litime-BMS_Victron-MPPT.ino.bin&quot; "
                     f"{base}/ota/upload")
         row_ip = f"<b style='color:{C_GREEN}'>{esp_ip}</b>"
         row_url = f"<a href='{ota_url}' style='color:{C_CYAN}'>{ota_url}</a>"
+        row_config = f"<a href='{config_url}' style='color:{C_CYAN}'>{config_url}</a>"
         row_curl = f"<code style='color:{C_ORANGE}'>{curl_cmd}</code>"
         wait = ""
     else:
         row_ip = f"<i style='color:{C_DIM}'>waiting for {TOPIC_BASE}/ip…</i>"
         row_url = f"<i style='color:{C_DIM}'>waiting for {TOPIC_BASE}/ip…</i>"
+        row_config = f"<i style='color:{C_DIM}'>waiting for {TOPIC_BASE}/ip…</i>"
         row_curl = f"<i style='color:{C_DIM}'>available once the IP is known</i>"
         wait = (f"<p style='color:{C_ORANGE}'>The ESP32 has not published its "
                 f"IP yet — it does so on every MQTT (re)connect.</p>")
 
-    auth = ("username <b>admin</b>, password from <code>OTA_PASSWORD</code> "
-            "in config.h") if OTA_PASSWORD else "none (no password set)"
+    auth = ("username <b>admin</b>, password from the device "
+            "<code>/config</code> page") if OTA_PASSWORD else "none (no password set)"
 
     return f"""
 <body style='margin:0;font-family:sans-serif;line-height:1.45'>
@@ -2022,6 +2038,7 @@ def _esp_help_html(esp_ip: str | None) -> str:
 <table style='margin:4px 0 10px 0'>
   <tr><td style='padding:2px 12px 2px 0;color:{C_DIM}'>ESP32 IP</td><td>{row_ip}</td></tr>
   <tr><td style='padding:2px 12px 2px 0;color:{C_DIM}'>OTA page</td><td>{row_url}</td></tr>
+  <tr><td style='padding:2px 12px 2px 0;color:{C_DIM}'>Config page</td><td>{row_config}</td></tr>
   <tr><td style='padding:2px 12px 2px 0;color:{C_DIM}'>Page auth</td><td>{auth}</td></tr>
 </table>
 <p><b style='color:{C_TEXT}'>CLI shortcuts</b></p>
@@ -2716,6 +2733,16 @@ class Window(QMainWindow):
         # QNetworkAccessManager for the OTA POST (kept alive on the Window)
         self._ota_nam = QNetworkAccessManager(self)
 
+        # Post-flash / post-reboot return-watch state: after a successful
+        # OTA upload (or a Reboot command) we follow the device through its
+        # reboot cycle (LWT "offline" → fresh boot "online") and report it,
+        # with a 3-minute safety net in case it never comes back.
+        self._esp_reboot_t0 = None            # None = not watching
+        self._esp_reboot_reason = ""          # "ota" | "cmd"
+        self._esp_reboot_timer = QTimer(self)
+        self._esp_reboot_timer.setSingleShot(True)
+        self._esp_reboot_timer.timeout.connect(self._esp_reboot_timeout)
+
         root.addWidget(right, 1)
         return w
 
@@ -2785,6 +2812,7 @@ class Window(QMainWindow):
         self._ota_start_reply = self._ota_nam.get(QNetworkRequest(start_url))
         self._ota_start_reply.finished.connect(self._ota_start_done)
 
+        self.ota_progress.setRange(0, 100)   # (re-)arm after any busy animation
         self.ota_progress.setValue(0)
         self.ota_status_lbl.setText("Starting OTA session on the ESP32…")
         self.ota_upload_btn.setEnabled(False)
@@ -2853,11 +2881,12 @@ class Window(QMainWindow):
         code = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
         err  = reply.error()
         if err == QNetworkReply.NoError and code == 200:
-            self.ota_progress.setValue(100)
+            self.ota_progress.setRange(0, 0)   # busy animation: awaiting reboot
             self.ota_status_lbl.setText(
-                "Upload complete — ESP32 is rebooting into the new firmware…")
+                "Upload complete — ESP32 is rebooting…")
             self._log("OTA upload OK (verified md5, HTTP 200) – ESP32 "
                       "rebooting into the new firmware", C_GREEN)
+            self._esp_reboot_begin("ota")
         else:
             body = bytes(reply.readAll()).decode(errors="replace")[:160]
             self.ota_status_lbl.setText(
@@ -2880,6 +2909,8 @@ class Window(QMainWindow):
         self._log(f"ESP32 reboot requested (published REBOOT to {TOPIC_BASE}/cmd)",
                   C_ORANGE)
         self.reboot_btn.setEnabled(False)
+        self.ota_status_lbl.setText("Reboot requested — waiting for the ESP32…")
+        self._esp_reboot_begin("cmd")
 
     def _on_esp_ip(self, ip: str):
         ip = ip.strip()
@@ -2893,6 +2924,63 @@ class Window(QMainWindow):
             self._log("ESP32: rebooting…", C_ORANGE)
         # Reboot button only works while the device is actually online
         self.reboot_btn.setEnabled(status == "online" and self._esp_ip is not None)
+
+        # ── Reboot-cycle tracking ─────────────────────────────────────────
+        # After an OTA flash the device reboots uncleanly (broker publishes
+        # the "offline" LWT) and after a REBOOT command it disconnects
+        # cleanly ("rebooting" was published, no LWT) — both then come back
+        # with "online" from the fresh boot. Follow it live on the tab.
+        if self._esp_reboot_t0 is not None:
+            if status == "offline":
+                self._log("ESP32 offline — rebooting…", C_ORANGE)
+                if self._esp_reboot_reason == "ota":
+                    self.ota_status_lbl.setText(
+                        "ESP32 is rebooting — waiting for it to come back…")
+            elif status == "online":
+                dur = int(time.time() - self._esp_reboot_t0)
+                reason = self._esp_reboot_reason
+                self._esp_reboot_end()
+                # Completed cycle → idle the progress bar at 0% so it only
+                # ever reflects an in-flight operation; the ✓ status text
+                # and Event Log entry carry the success record.
+                self.ota_progress.setRange(0, 100)
+                self.ota_progress.setValue(0)
+                if reason == "ota":
+                    self.ota_status_lbl.setText(
+                        f"✓ New firmware running — ESP32 back online "
+                        f"after {dur} s")
+                    self._log(f"ESP32 rebooted into the new firmware — back "
+                              f"online after {dur} s", C_GREEN)
+                else:
+                    self.ota_status_lbl.setText(
+                        f"✓ ESP32 back online after {dur} s")
+                    self._log(f"ESP32 back online after {dur} s", C_GREEN)
+
+    def _esp_reboot_begin(self, reason: str):
+        """Start watching for the ESP32's reboot cycle (offline → online).
+        reason: "ota" (after a successful flash) or "cmd" (Reboot button)."""
+        self._esp_reboot_t0 = time.time()
+        self._esp_reboot_reason = reason
+        self._esp_reboot_timer.start(180 * 1000)   # 3-min safety net
+
+    def _esp_reboot_end(self):
+        self._esp_reboot_t0 = None
+        self._esp_reboot_reason = ""
+        if self._esp_reboot_timer.isActive():
+            self._esp_reboot_timer.stop()
+
+    def _esp_reboot_timeout(self):
+        """The ESP32 never came back online within 3 minutes of a flash or
+        reboot request — surface it instead of leaving the tab 'waiting'."""
+        reason = self._esp_reboot_reason
+        self._esp_reboot_end()
+        msg = ("ESP32 did not come back online within 3 min — check the "
+               "LCD / power.")
+        if reason == "ota":
+            self.ota_progress.setRange(0, 100)
+            self.ota_progress.setValue(0)
+        self.ota_status_lbl.setText(msg)
+        self._log(msg, C_RED)
 
     # ── event tracking ────────────────────────────────────────────────────────
     # Battery flow (CHARGING/IDLE/DISCHARGING) chatter is suppressed with a

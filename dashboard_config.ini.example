@@ -1,0 +1,13 @@
+; Optional: copy this file to dashboard_config.ini (same folder as litime_monitor.py).
+; It is only needed if the device's hostname is NOT "litime.local" or you set an
+; OTA/config password on the device. Without it the dashboard uses the defaults below.
+;
+; This tells the desktop dashboard where to fetch /config.json from the ESP32.
+; All MQTT / naming / timing settings live ON THE DEVICE - edit them at
+; http://<host>/config, not here.
+
+[device]
+host = litime.local
+user = admin
+; Leave empty unless you set an OTA/config password on the device.
+password =

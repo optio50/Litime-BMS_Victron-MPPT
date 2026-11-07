@@ -34,6 +34,9 @@ public:
     // (A SUCCESSFUL upload never gets here — ElegantOTA reboots first.)
     bool consumeActivityFlag();
 
+    // The /update and /config pages share this server (port 80).
+    WebServer& server() { return _server; }
+
 private:
     WebServer _server{80};
     bool      _otaActivity = false;
