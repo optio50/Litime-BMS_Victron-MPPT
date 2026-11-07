@@ -63,7 +63,7 @@ struct VictronData {
 // =============================================================================
 #define VICTRON_SCAN_MAX 4
 struct VictronScanResult {
-    char    mac[20]     = "";   // e.g. "ea:f3:a2:dc:a1:ec"
+    char    mac[20]     = "";   // e.g. "aa:bb:cc:dd:ee:ff"
     uint8_t raw[26]     = {0};
     uint8_t rawLen      = 0;
     char    raw_hex[82] = "";   // printable hex dump
